@@ -201,18 +201,19 @@ namespace FRCM.View
             var detectedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                // This script specifically targets the full hardware Instance ID
-                // which contains the long 128-character serial number.
+                // COMBINED SCAN: 
+                // 1. PnP scan gets the full 128-char serial for SanDisk.
+                // 2. DiskDrive scan gets the '123456789' for Raspberry Pi.
                 string psScript = @"
                     $results = @();
-                    # Get the full Instance ID from the USB Mass Storage layer
+                    # Get Instance IDs from Mass Storage
                     $results += Get-PnpDevice -Status OK -Class 'USB' | Where-Object { $_.FriendlyName -match 'Mass Storage' } | Select-Object -ExpandProperty InstanceId | ForEach-Object { 
-                        if ($_.Contains('\')) { $_.Split('\')[-1] } else { $_ }
+                        $s = $_.Split('\')[-1]; if ($s.Contains('&')) { $s = $s.Split('&')[0] }; $s 
                     };
-                    # Fallback to standard serial if Mass Storage is different
+                    # Get SerialNumbers from Disk Drives
                     $results += Get-CimInstance Win32_DiskDrive | Where-Object { $_.InterfaceType -eq 'USB' } | Select-Object -ExpandProperty SerialNumber;
                     
-                    $results | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | Select-Object -Unique
+                    $results | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -gt 2 } | Select-Object -Unique
                 ";
 
                 var psi = new ProcessStartInfo 
@@ -232,7 +233,6 @@ namespace FRCM.View
                     foreach (var line in output.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
                     {
                         string id = line.Trim();
-                        if (id.Contains("&")) id = id.Split('&')[0]; // Clean up any trailing &0 or &1
                         if (!string.IsNullOrEmpty(id)) detectedIds.Add(id);
                     }
                 }
@@ -240,8 +240,7 @@ namespace FRCM.View
             catch (Exception ex) { AppendOutput($"Local scan error: {ex.Message}"); }
 
             var list = detectedIds.ToList();
-            // Filter out any ID that is a substring of another longer ID 
-            // (e.g., remove the 20-char partial ID if the 128-char full ID is present)
+            // Final step: If a short ID is just the start of a long ID, keep only the long one.
             return list.Where(id => !list.Any(other => other.Length > id.Length && other.StartsWith(id, StringComparison.OrdinalIgnoreCase))).ToList();
         }
 
