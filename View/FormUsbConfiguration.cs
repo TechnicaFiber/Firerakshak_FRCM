@@ -89,7 +89,7 @@ namespace FRCM.View
             buttonPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50)); 
 
             btnRead = CreateButton("Read");
-            btnAdd = CreateButton("Add");
+            btnAdd = CreateButton("Scan");
             btnDelete = CreateButton("Delete");
             btnSave = CreateButton("Save");
             btnClose = CreateButton("Close");
