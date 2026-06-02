@@ -1,0 +1,1 @@
+I have increased the size of the "read" and "apply" buttons in `ChannelControl.cs` and adjusted their spacing. They should now appear slightly larger when the form is maximized.

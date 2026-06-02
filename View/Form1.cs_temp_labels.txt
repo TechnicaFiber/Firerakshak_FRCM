@@ -1,0 +1,80 @@
+            InitializeGraph();
+            
+            float scalingFactor = this.DeviceDpi / 96f;
+            float fontScaling = GetFontScaling();
+
+            // ---------------- GRAPH INFO LABELS ----------------
+            // Set panel height to 60 to move the graph plot up (DPI aware)
+            panelGraphControls.Height = (int)(60 * scalingFactor);
+            int sharedHeight = (int)(30 * scalingFactor);
+
+            // 🚀 PERFECT HORIZONTAL SYNC & UNIFORM HEIGHT
+            lblXAxis.Location = new Point((int)(5 * scalingFactor), (int)(20 * scalingFactor));
+            txtXMin.Location = new Point((int)(22 * scalingFactor), (int)(15 * scalingFactor)); 
+            txtXMin.Size = new Size((int)(40 * scalingFactor), sharedHeight);
+            lblXTo.Location = new Point((int)(65 * scalingFactor), (int)(20 * scalingFactor));
+            txtXMax.Location = new Point((int)(85 * scalingFactor), (int)(15 * scalingFactor)); 
+            txtXMax.Size = new Size((int)(40 * scalingFactor), sharedHeight);
+
+            lblYAxis.Location = new Point((int)(135 * scalingFactor), (int)(20 * scalingFactor)); 
+            txtYMin.Location = new Point((int)(152 * scalingFactor), (int)(15 * scalingFactor)); 
+            txtYMin.Size = new Size((int)(40 * scalingFactor), sharedHeight);
+            lblYTo.Location = new Point((int)(195 * scalingFactor), (int)(20 * scalingFactor));
+            txtYMax.Location = new Point((int)(215 * scalingFactor), (int)(15 * scalingFactor)); 
+            txtYMax.Size = new Size((int)(40 * scalingFactor), sharedHeight);
+
+            btnApplyAxis.Location = new Point((int)(265 * scalingFactor), (int)(15 * scalingFactor)); 
+            btnApplyAxis.Size = new Size((int)(65 * scalingFactor), sharedHeight);
+            btnResetAxis.Location = new Point((int)(335 * scalingFactor), (int)(15 * scalingFactor));
+            btnResetAxis.Size = new Size((int)(65 * scalingFactor), sharedHeight);
+
+            // Container for Labels
+            var pnlGraphLabels = new TableLayoutPanel
+            {
+                Location = new Point((int)(410 * scalingFactor), 0), 
+                Size = new Size(panelGraphControls.Width - (int)(415 * scalingFactor), (int)(60 * scalingFactor)), 
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+                ColumnCount = 3,
+                RowCount = 1,
+                BackColor = System.Drawing.Color.Transparent,
+                Padding = new Padding(0, 0, (int)(15 * scalingFactor), 0)
+            };
+            pnlGraphLabels.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            pnlGraphLabels.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            pnlGraphLabels.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            pnlGraphLabels.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            panelGraphControls.Controls.Add(pnlGraphLabels);
+
+            // 1. Graph Title Label (Reduced to 8.5pt)
+            lblGraphTitle = new System.Windows.Forms.Label
+            {
+                AutoSize = true,
+                BackColor = System.Drawing.Color.Transparent,
+                Font = new System.Drawing.Font("Segoe UI", 8.5f * fontScaling, System.Drawing.FontStyle.Bold),
+                ForeColor = System.Drawing.Color.Black,
+                Text = _currentGraphTitle,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                MaximumSize = new Size((int)(350 * scalingFactor), 0),
+                AutoEllipsis = true
+            };
+
+            // 2. Cursor Value Label (Reduced to 7.5pt, smaller padding)
+            lblCursorValue = new System.Windows.Forms.Label
+            {
+                AutoSize = true,
+                BackColor = System.Drawing.Color.FromArgb(230, System.Drawing.Color.White),
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = new System.Drawing.Font("Segoe UI", 7.5f * fontScaling, System.Drawing.FontStyle.Bold),
+                Visible = false,
+                Anchor = AnchorStyles.Right,
+                TextAlign = ContentAlignment.MiddleRight,
+                Padding = new Padding((int)(3 * scalingFactor), (int)(3 * scalingFactor), (int)(3 * scalingFactor), (int)(5 * scalingFactor)),
+                Margin = new Padding(0, 0, (int)(10 * scalingFactor), 0),
+                UseCompatibleTextRendering = true
+            };
+
+            pnlGraphLabels.Controls.Add(lblGraphTitle, 0, 0);
+            pnlGraphLabels.Controls.Add(lblCursorValue, 2, 0);
+            lblGraphTitle.BringToFront();
+            lblCursorValue.BringToFront();
