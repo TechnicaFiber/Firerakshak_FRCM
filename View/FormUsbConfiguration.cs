@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -160,38 +162,87 @@ namespace FRCM.View
 
         private async Task BtnAdd_Click()
         {
-            AppendOutput("Scanning for USB devices on server...");
-            var serverDevices = new List<string>();
+            AppendOutput("Scanning for USB devices on local machine...");
+            var devices = await GetLocalUsbSerials();
 
-            try
-            {
-                var response = await _wsClient.SendCommandAsync("USBConfigurationCommand", new { SubCommand = "Scan" });
-                if (response.HasValue && response.Value.TryGetProperty("Payload", out var payload))
-                {
-                    if (payload.TryGetProperty("Success", out var success) && success.GetBoolean() && payload.TryGetProperty("DeviceIds", out var idsProp))
-                    {
-                        foreach (var id in idsProp.EnumerateArray()) serverDevices.Add(id.GetString() ?? "");
-                    }
-                }
+            if (devices.Count == 0) 
+            { 
+                MessageBox.Show("No USB devices detected on your Windows PC.", "Scan Result", MessageBoxButtons.OK, MessageBoxIcon.Information); 
+                return; 
             }
-            catch (Exception ex) { AppendOutput($"Server scan failed: {ex.Message}"); }
-
-            if (serverDevices.Count == 0) { MessageBox.Show("No USB devices detected on server.", "Scan Result", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
 
             using (var form = new Form())
             {
                 var list = new ListBox { Dock = DockStyle.Fill, Font = new Font("Segoe UI", 9) };
-                foreach (var id in serverDevices) list.Items.Add(id);
+                foreach (var id in devices) list.Items.Add(id);
                 var btnOk = new Button { Text = "Add Selected", Dock = DockStyle.Bottom, Height = 40, UseVisualStyleBackColor = true };
                 btnOk.Click += (s, ev) => { form.DialogResult = DialogResult.OK; form.Close(); };
-                form.Text = "Select USB to Add"; form.Controls.Add(list); form.Controls.Add(btnOk); form.Size = new Size(500, 400); form.StartPosition = FormStartPosition.CenterParent; form.FormBorderStyle = FormBorderStyle.FixedDialog;
+                form.Text = "Select USB to Add (Local PC)"; 
+                form.Controls.Add(list); 
+                form.Controls.Add(btnOk); 
+                form.Size = new Size(500, 400); 
+                form.StartPosition = FormStartPosition.CenterParent; 
+                form.FormBorderStyle = FormBorderStyle.FixedDialog;
 
                 if (form.ShowDialog() == DialogResult.OK && list.SelectedItem != null)
                 {
                     string serial = list.SelectedItem.ToString()!.Trim();
-                    if (!string.IsNullOrEmpty(serial) && !lstAuthorizedIds.Items.Contains(serial)) { lstAuthorizedIds.Items.Add(serial); AppendOutput($"Added serial: {serial}"); }
+                    if (!string.IsNullOrEmpty(serial) && !lstAuthorizedIds.Items.Contains(serial)) 
+                    { 
+                        lstAuthorizedIds.Items.Add(serial); 
+                        AppendOutput($"Added local serial: {serial}"); 
+                    }
                 }
             }
+        }
+
+        private async Task<List<string>> GetLocalUsbSerials()
+        {
+            var detectedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                // This script specifically targets the full hardware Instance ID
+                // which contains the long 128-character serial number.
+                string psScript = @"
+                    $results = @();
+                    # Get the full Instance ID from the USB Mass Storage layer
+                    $results += Get-PnpDevice -Status OK -Class 'USB' | Where-Object { $_.FriendlyName -match 'Mass Storage' } | Select-Object -ExpandProperty InstanceId | ForEach-Object { 
+                        if ($_.Contains('\')) { $_.Split('\')[-1] } else { $_ }
+                    };
+                    # Fallback to standard serial if Mass Storage is different
+                    $results += Get-CimInstance Win32_DiskDrive | Where-Object { $_.InterfaceType -eq 'USB' } | Select-Object -ExpandProperty SerialNumber;
+                    
+                    $results | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' } | Select-Object -Unique
+                ";
+
+                var psi = new ProcessStartInfo 
+                { 
+                    FileName = "powershell", 
+                    Arguments = $"-NoProfile -Command \"{psScript.Replace("\"", "\\\"")}\"", 
+                    RedirectStandardOutput = true, 
+                    UseShellExecute = false, 
+                    CreateNoWindow = true 
+                };
+
+                using var process = Process.Start(psi);
+                if (process != null) 
+                { 
+                    string output = await process.StandardOutput.ReadToEndAsync(); 
+                    await process.WaitForExitAsync(); 
+                    foreach (var line in output.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        string id = line.Trim();
+                        if (id.Contains("&")) id = id.Split('&')[0]; // Clean up any trailing &0 or &1
+                        if (!string.IsNullOrEmpty(id)) detectedIds.Add(id);
+                    }
+                }
+            }
+            catch (Exception ex) { AppendOutput($"Local scan error: {ex.Message}"); }
+
+            var list = detectedIds.ToList();
+            // Filter out any ID that is a substring of another longer ID 
+            // (e.g., remove the 20-char partial ID if the 128-char full ID is present)
+            return list.Where(id => !list.Any(other => other.Length > id.Length && other.StartsWith(id, StringComparison.OrdinalIgnoreCase))).ToList();
         }
 
         private void BtnDelete_Click(object? sender, EventArgs e)
