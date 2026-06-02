@@ -7418,6 +7418,33 @@ namespace FRCM
             }
         }
 
+        private void usbConfigurationToolStripMenuItem_Click(object? sender, EventArgs e)
+        {
+            UpdateStatus("Opening USB Configuration...");
+
+            if (FormUsbConfiguration.Instance == null || FormUsbConfiguration.Instance.IsDisposed)
+            {
+                var form = new FormUsbConfiguration(_wsClient, _loginRole);
+
+                form.UsbOperationStatus += msg =>
+                {
+                    UpdateStatus(msg);
+                };
+
+                form.UsbConfigurationClosed += () =>
+                {
+                    UpdateStatus("USB configuration closed");
+                };
+
+                form.Show(this);
+            }
+            else
+            {
+                FormUsbConfiguration.Instance.Show();
+                FormUsbConfiguration.Instance.BringToFront();
+            }
+        }
+
 
         private async void resetAllConfigurationToolStripMenuItem_Click(object? sender, EventArgs e)
         {

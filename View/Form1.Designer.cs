@@ -69,6 +69,7 @@
             menuStrip1 = new MenuStrip();
             Configuration = new ToolStripMenuItem();
             channelZoneConfigurationToolStripMenuItem = new ToolStripMenuItem();
+            usbConfigurationToolStripMenuItem = new ToolStripMenuItem();
             loadConfigurationFileToolStripMenuItem = new ToolStripMenuItem();
             saveConfigurationFileToolStripMenuItem = new ToolStripMenuItem();
             iPConfigurationToolStripMenuItem = new ToolStripMenuItem();
@@ -471,10 +472,17 @@
             // 
             // Configuration
             // 
-            Configuration.DropDownItems.AddRange(new ToolStripItem[] { channelZoneConfigurationToolStripMenuItem, loadConfigurationFileToolStripMenuItem, saveConfigurationFileToolStripMenuItem, iPConfigurationToolStripMenuItem, clockConfigurationToolStripMenuItem, resetAllConfigurationToolStripMenuItem });
+            Configuration.DropDownItems.AddRange(new ToolStripItem[] { channelZoneConfigurationToolStripMenuItem, usbConfigurationToolStripMenuItem, loadConfigurationFileToolStripMenuItem, saveConfigurationFileToolStripMenuItem, iPConfigurationToolStripMenuItem, clockConfigurationToolStripMenuItem, resetAllConfigurationToolStripMenuItem });
             Configuration.Name = "Configuration";
             Configuration.Size = new Size(137, 29);
             Configuration.Text = "Configuration";
+            // 
+            // usbConfigurationToolStripMenuItem
+            // 
+            usbConfigurationToolStripMenuItem.Name = "usbConfigurationToolStripMenuItem";
+            usbConfigurationToolStripMenuItem.Size = new Size(338, 34);
+            usbConfigurationToolStripMenuItem.Text = "USB Configuration";
+            usbConfigurationToolStripMenuItem.Click += usbConfigurationToolStripMenuItem_Click;
             // 
             // channelZoneConfigurationToolStripMenuItem
             // 
@@ -1108,6 +1116,7 @@
         private GroupBox groupStatus;
         private RichTextBox richTextBoxStatus;
         private ToolStripMenuItem iPConfigurationToolStripMenuItem;
+        private ToolStripMenuItem usbConfigurationToolStripMenuItem;
         private Panel panelGraphControls;
         private Label lblXAxis;
         private TextBox txtXMin;
