@@ -42,13 +42,12 @@ namespace FRCM.View
             this.WindowState = FormWindowState.Normal;
             this.StartPosition = FormStartPosition.CenterParent;
 
-            this.Load += async (s, e) =>
+            this.Load += (s, e) =>
             {
                 FRCM.Services.FontSizeHelper.UpdateControlRecursive(
                     this,
                     FRCM.Services.FontSizeHelper.CurrentMultiplier
                 );
-                await LoadAuthorizedIds(silent: true);
             };
         }
 
