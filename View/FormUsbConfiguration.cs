@@ -187,10 +187,20 @@ namespace FRCM.View
                 if (form.ShowDialog() == DialogResult.OK && list.SelectedItem != null)
                 {
                     string serial = list.SelectedItem.ToString()!.Trim();
-                    if (!string.IsNullOrEmpty(serial) && !lstAuthorizedIds.Items.Contains(serial)) 
-                    { 
-                        lstAuthorizedIds.Items.Add(serial); 
-                        AppendOutput($"Added local serial: {serial}"); 
+                    if (!string.IsNullOrEmpty(serial))
+                    {
+                        bool alreadyExists = lstAuthorizedIds.Items.Cast<string>()
+                            .Any(item => string.Equals(item, serial, StringComparison.OrdinalIgnoreCase));
+
+                        if (alreadyExists)
+                        {
+                            MessageBox.Show($"Device {serial} is already present.", "Duplicate Device", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        }
+                        else
+                        {
+                            lstAuthorizedIds.Items.Add(serial);
+                            AppendOutput($"Added local serial: {serial}");
+                        }
                     }
                 }
             }
