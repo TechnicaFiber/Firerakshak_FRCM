@@ -1,0 +1,113 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<Nullable>enable</Nullable>
+		<UseWindowsForms>true</UseWindowsForms>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<ApplicationManifest>app.manifest</ApplicationManifest>
+
+		<!-- Suppress nullable reference warnings and unused field warnings -->
+		<NoWarn>CS8600;CS8601;CS8602;CS8604;CS8618;CS8622;CS0169;CS0414;CS1998;CS4014;NU1701;MSB3245</NoWarn>
+		<MSBuildWarningsAsMessages>MSB3245</MSBuildWarningsAsMessages>
+
+		<!-- Preprocessor Macro: Uncomment to build for WSS (Secure), comment out to build for WS (Unsecure) -->
+		<DefineConstants>$(DefineConstants);USE_SECURE</DefineConstants>
+	</PropertyGroup>
+
+
+	<ItemGroup>
+		<Compile Remove="FRMC\**" />
+		<EmbeddedResource Remove="FRMC\**" />
+		<None Remove="FRMC\**" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Remove="appsettings.json" />
+	</ItemGroup>
+
+
+	<ItemGroup>
+		<Content Include="appsettings.json">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
+	</ItemGroup>
+
+
+	<ItemGroup>
+		<PackageReference Include="EPPlus" Version="4.5.3.3" />
+		<PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.10" />
+		<PackageReference Include="Microsoft.Extensions.Configuration.FileExtensions" Version="9.0.10" />
+		<PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="9.0.10" />
+		<PackageReference Include="Microsoft.IdentityModel.Tokens" Version="8.14.0" />
+		<PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+		<PackageReference Include="ScottPlot.WinForms" Version="5.1.57" />
+		<PackageReference Include="ScottPlot.WPF" Version="5.1.57" />
+		<PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.14.0" />
+		<PackageReference Include="System.IO.Ports" Version="8.0.0" />
+	</ItemGroup>
+
+
+	<ItemGroup>
+		<Reference Include="FireRakshak.Common">
+			<HintPath>..\..\..\FRCM_Common\FRCM_Common\FireRakshak.Common\bin\Debug\net8.0\FireRakshak.Common.dll</HintPath>
+		</Reference>
+
+		<Reference Include="FireRakshak.FRMC.Core">
+			<HintPath>..\..\..\..\firerakshak.build\FireRakshak.FRMC.Core.dll</HintPath>
+		</Reference>
+
+		<Reference Include="FireRakshak.Shared">
+			<HintPath>..\..\Fireraksh.dll\FireRakshak.Shared.dll</HintPath>
+		</Reference>
+	</ItemGroup>
+
+
+	<ItemGroup>
+		<Compile Update="Properties\Resources.Designer.cs">
+			<DesignTime>True</DesignTime>
+			<AutoGen>True</AutoGen>
+			<DependentUpon>Resources.resx</DependentUpon>
+		</Compile>
+	</ItemGroup>
+
+
+	<ItemGroup>
+		<EmbeddedResource Update="Properties\Resources.resx">
+			<Generator>ResXFileCodeGenerator</Generator>
+			<LastGenOutput>Resources.Designer.cs</LastGenOutput>
+		</EmbeddedResource>
+	</ItemGroup>
+
+
+	<!-- Ensure Installer folder structure appears in Solution Explorer -->
+	<ItemGroup>
+		<Folder Include="Installer\" />
+		<Folder Include="Installer\bin\" />
+		<Folder Include="Installer\obj\" />
+		<Folder Include="Installer\publish\" />
+		<Folder Include="Installer\bundle\" />
+	</ItemGroup>
+
+
+	<!-- Create installer folder structure automatically -->
+	<Target Name="CreateInstallerFolders" AfterTargets="Build">
+		<MakeDir Directories="Installer\bin" />
+		<MakeDir Directories="Installer\obj" />
+		<MakeDir Directories="Installer\publish" />
+		<MakeDir Directories="Installer\bundle" />
+	</Target>
+
+
+	<!-- Copy publish output into Installer/publish -->
+	<Target Name="CopyPublishOutputToInstaller" AfterTargets="Publish">
+		<Copy SourceFiles="@(ResolvedFileToPublish)" DestinationFolder="Installer\publish" SkipUnchangedFiles="true" />
+	</Target>
+
+	<!-- Automatically build setup.exe using Inno Setup -->
+	<Target Name="BuildInstaller" AfterTargets="Publish">
+		<Exec Command="&quot;C:\Program Files (x86)\Inno Setup 6\ISCC.exe&quot; Installer\setup.iss" />
+	</Target>
+
+</Project>
