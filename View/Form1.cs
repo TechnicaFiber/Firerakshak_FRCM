@@ -1,4 +1,4 @@
-﻿using FireRakshak.FRMC.Core.Models;
+using FireRakshak.FRMC.Core.Models;
 using FRCM;
 using FRCM.Models;
 using FRCM.Services;
@@ -33,11 +33,19 @@ namespace FRCM
         // DUAL WEBSOCKET: Separate client for temperature data streaming (port 6165)
         private DataStreamClient? _dataStreamClient;
 
+        // FM-05: Dual-Port Health Watchdog against Asymmetric Port Desynchronization
+        private CancellationTokenSource? _dualPortWatchdogCts;
+        private readonly object _dualPortWatchdogLock = new();
+        private DateTime _lastWatchdogResyncUtc = DateTime.MinValue;
+
         // MULTI-THREADED PROCESSING: Dedicated background threads for data processing
         private TemperatureDataProcessor? _temperatureProcessor;
         private CommandMessageProcessor? _commandProcessor;
 
         private ChannelClient _ChannelClient;
+
+        // FM-07: Double-buffered trace cache for thread-safe lock-free graph rendering and cursor tracking
+        private readonly DoubleBufferedTraceCache _traceCache = new();
 
         private List<double> distances = new();
         private List<double> temperatures = new();
@@ -160,6 +168,10 @@ namespace FRCM
         // System Health LED tooltip and active faults cache
         private ToolTip? _systemHealthToolTip = null;
         private List<SystemHealthFaultInfo> _activeHealthFaults = new List<SystemHealthFaultInfo>();
+
+        // Reconnect state: prevents multiple simultaneous reconnect loops
+        private bool _isReconnecting = false;
+        private ConnectingPopup? _connectingPopup = null; // shown immediately while retrying
 
         public Form1(ITemperatureDataService temperatureDataService, ILogger logger,
               string username, string password,
@@ -518,12 +530,16 @@ namespace FRCM
             // _temperatureDataService.TemperatureDataUpdated += OnTemperatureDataUpdated;
             _wsClient.MessageReceived += OnWebSocketMessageReceived;
             _wsClient.BinaryMessageReceived += OnWebSocketBinaryMessageReceived;
+            _wsClient.ConnectionLost += OnMainWebSocketConnectionLost;
             if (_wsClient.IsConnected)
             {
                 UpdateStatus("WebSocket connected successfully");
 
                 // DUAL WEBSOCKET: Initialize and connect the data stream client for temperature data
                 await InitializeDataStreamClientAsync();
+
+                // FM-05: Start Dual-Port Health Watchdog to detect and recover asymmetric port desync
+                StartDualPortHealthWatchdog();
 
                 // Ensure FRMC is not streaming when DTSCM starts
                 await StopMonitoringAsync();
@@ -648,10 +664,21 @@ namespace FRCM
             {
                 // ✅ CHANNEL MODE → live graph allowed
                 UpdateGraph(dataPoints);
+            }
 
-                _channelGraphCache[channelId] = (
-                    dataPoints.Select(p => p.Position).ToList(),
-                    dataPoints.Select(p => p.Temperature).ToList()
+            // ✅ Keep full channel cache up-to-date (for channel views, diagnostics, and calibration)
+            _channelGraphCache[channelId] = (
+                dataPoints.Select(p => p.Position).ToList(),
+                dataPoints.Select(p => p.Temperature).ToList()
+            );
+
+            // Forward live channel data to Temperature Correction window if open
+            if (FormTemperatureCorrection.Instance != null && !FormTemperatureCorrection.Instance.IsDisposed)
+            {
+                FormTemperatureCorrection.Instance.UpdateLiveChannelData(
+                    channelId,
+                    dataPoints.Select(p => p.Position).ToArray(),
+                    dataPoints.Select(p => p.Temperature).ToArray()
                 );
             }
 
@@ -798,6 +825,211 @@ namespace FRCM
                 {
                     Console.WriteLine($"[DUAL WS] Reconnect failed: {ex.Message}");
                 }
+            });
+        }
+
+        /// <summary>
+        /// FM-05: Dual-Port Health Watchdog.
+        /// Monitors asymmetric port desynchronization between Control WebSocket (Port 6164)
+        /// and Data Stream WebSocket (Port 6165).
+        /// If streaming is active and Control port is healthy but Data port stops receiving frames
+        /// for > 15 seconds, the watchdog triggers an automatic stream resynchronization.
+        /// </summary>
+        private void StartDualPortHealthWatchdog()
+        {
+            lock (_dualPortWatchdogLock)
+            {
+                if (_dualPortWatchdogCts != null && !_dualPortWatchdogCts.IsCancellationRequested)
+                    return;
+
+                _dualPortWatchdogCts = new CancellationTokenSource();
+            }
+
+            var token = _dualPortWatchdogCts.Token;
+            _ = Task.Run(async () =>
+            {
+                Console.WriteLine("[DUAL PORT WATCHDOG] Started monitoring Ports 6164/6165 health (FM-05)");
+
+                // Initial warm-up delay before active checks
+                try
+                {
+                    await Task.Delay(10000, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(5000, token).ConfigureAwait(false);
+
+                        // Check only when Control Port (6164) is connected and monitoring/plotting is active
+                        if (_wsClient != null && _wsClient.IsConnected && (isMonitoring || isPlottingEnabled) && _subscribedChannelId > 0)
+                        {
+                            // Avoid flapping: enforce minimum 15s cooldown between resync attempts
+                            if ((DateTime.UtcNow - _lastWatchdogResyncUtc).TotalSeconds < 15)
+                                continue;
+
+                            bool streamStalled = false;
+                            string stallReason = "";
+
+                            if (_dataStreamClient == null || !_dataStreamClient.IsConnected)
+                            {
+                                streamStalled = true;
+                                stallReason = "Data Stream client is disconnected on Port 6165";
+                            }
+                            else if (_dataStreamClient.LastDataReceivedUtc != DateTime.MinValue)
+                            {
+                                var timeSinceLastData = DateTime.UtcNow - _dataStreamClient.LastDataReceivedUtc;
+                                if (timeSinceLastData > TimeSpan.FromSeconds(15))
+                                {
+                                    streamStalled = true;
+                                    stallReason = $"No data received on Port 6165 for {timeSinceLastData.TotalSeconds:F0}s";
+                                }
+                            }
+
+                            if (streamStalled)
+                            {
+                                _lastWatchdogResyncUtc = DateTime.UtcNow;
+                                Console.WriteLine($"[DUAL PORT WATCHDOG] ⚠️ Asymmetric port desync detected: {stallReason} while Control Port 6164 is healthy (FM-05). Resynchronizing stream...");
+                                _logger.Log($"[DUAL PORT WATCHDOG] Asymmetric port desync detected: {stallReason}. Resynchronizing...");
+
+                                try
+                                {
+                                    if (_dataStreamClient == null || !_dataStreamClient.IsConnected)
+                                    {
+                                        await InitializeDataStreamClientAsync();
+                                    }
+                                    else
+                                    {
+                                        await _dataStreamClient.ReconnectAsync();
+                                    }
+
+                                    if (_subscribedChannelId > 0 && _dataStreamClient != null && _dataStreamClient.IsConnected)
+                                    {
+                                        await _dataStreamClient.SubscribeToChannelAsync(_subscribedChannelId);
+                                        Console.WriteLine($"[DUAL PORT WATCHDOG] ✅ Resubscribed to Channel {_subscribedChannelId} after stream resync.");
+                                    }
+                                }
+                                catch (Exception resyncEx)
+                                {
+                                    Console.WriteLine($"[DUAL PORT WATCHDOG] ❌ Stream resynchronization attempt failed: {resyncEx.Message}");
+                                }
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[DUAL PORT WATCHDOG] Watchdog error: {ex.Message}");
+                    }
+                }
+                Console.WriteLine("[DUAL PORT WATCHDOG] Watchdog stopped.");
+            }, token);
+        }
+
+        private void StopDualPortHealthWatchdog()
+        {
+            lock (_dualPortWatchdogLock)
+            {
+                try
+                {
+                    _dualPortWatchdogCts?.Cancel();
+                    _dualPortWatchdogCts?.Dispose();
+                    _dualPortWatchdogCts = null;
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Fired by CustomWebSocketClient when the main control WebSocket drops unexpectedly.
+        /// Shows a popup immediately with Retry and Close options.
+        /// Retry  → attempts to reconnect and re-authenticate with FRMC.
+        /// Close  → exits the DTSCM application.
+        /// </summary>
+        private void OnMainWebSocketConnectionLost(object? sender, EventArgs e)
+        {
+            if (_isReconnecting)
+                return;
+
+            Console.WriteLine("[WS] Main control WebSocket connection lost.");
+            _logger.Log("[WS] Connection to FRMC lost.");
+
+            if (!this.IsHandleCreated || this.IsDisposed)
+                return;
+
+            this.BeginInvoke(() =>
+            {
+                UpdateStatus("⚠ Connection to FRMC lost.");
+
+                // Close any stale popup first
+                _connectingPopup?.SafeClose();
+                _connectingPopup = new ConnectingPopup();
+
+                // Retry button → keep retrying in a loop until connected.
+                // User does not need to press Retry again; popup stays on "Connecting..."
+                _connectingPopup.RetryRequested += async (_, _) =>
+                {
+                    if (_isReconnecting) return;
+                    _isReconnecting = true;
+
+                    Console.WriteLine("[WS] User requested reconnect — retrying until connected.");
+                    _logger.Log("[WS] Retrying connection to FRMC...");
+
+                    bool reconnected = false;
+
+                    while (!reconnected && _connectingPopup != null && !_connectingPopup.IsDisposed)
+                    {
+                        try
+                        {
+                            await _wsClient.ConnectAsync(Program.FrmcHost, timeoutSeconds: 5);
+
+                            if (_wsClient.IsConnected)
+                            {
+                                var loginResp = await _wsClient.LoginAsync(_username, _password);
+                                if (loginResp != null && loginResp.Success)
+                                {
+                                    reconnected = true;
+                                    Console.WriteLine($"[WS] Re-authenticated as {loginResp.Username}.");
+                                    _logger.Log("[WS] Reconnected and re-authenticated with FRMC.");
+
+                                    if (_dataStreamClient == null)
+                                        await InitializeDataStreamClientAsync();
+
+                                    StartDualPortHealthWatchdog();
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[WS] Reconnect attempt failed: {ex.Message}");
+                        }
+
+                        if (!reconnected)
+                            await Task.Delay(3000); // wait 3s before next attempt
+                    }
+
+                    _isReconnecting = false;
+
+                    if (reconnected && this.IsHandleCreated && !this.IsDisposed)
+                    {
+                        this.BeginInvoke(() =>
+                        {
+                            _connectingPopup?.SafeClose();
+                            _connectingPopup = null;
+                            UpdateStatus("✅ Reconnected to FRMC.");
+                        });
+                    }
+                };
+
+                _connectingPopup.Show(this);
             });
         }
 
@@ -1481,10 +1713,9 @@ namespace FRCM
             if (lblCursorValue == null)
                 return;
 
-            if (distances == null || temperatures == null)
-                return;
-
-            if (distances.Count == 0 || temperatures.Count == 0)
+            // FM-07: Read from thread-safe double-buffered immutable snapshot
+            var snapshot = _traceCache.FrontBuffer;
+            if (snapshot.Count == 0)
                 return;
 
             // Convert mouse pixel -> plot coordinate
@@ -1496,38 +1727,14 @@ namespace FRCM
             double mouseY = mouseCoords.Y;
 
             // Keep inside graph range
-            if (mouseX < distances.Min())
-                mouseX = distances.Min();
+            if (mouseX < snapshot.MinDistance)
+                mouseX = snapshot.MinDistance;
 
-            if (mouseX > distances.Max())
-                mouseX = distances.Max();
+            if (mouseX > snapshot.MaxDistance)
+                mouseX = snapshot.MaxDistance;
 
-            // Find nearest plotted point
-            int nearestIndex = 0;
-
-            double nearestDistance = double.MaxValue;
-
-            for (int i = 0; i < distances.Count; i++)
-            {
-                double diff =
-                    Math.Abs(distances[i] - mouseX);
-
-                if (diff < nearestDistance)
-                {
-                    nearestDistance = diff;
-                    nearestIndex = i;
-                }
-            }
-
-            // Safe bounds
-            nearestIndex = Math.Max(
-                0,
-                Math.Min(nearestIndex, temperatures.Count - 1));
-
-            // Actual plotted values
-            double actualX = distances[nearestIndex];
-
-            double actualTemp = temperatures[nearestIndex];
+            // Fast, race-condition-free nearest point lookup
+            var (actualX, actualTemp, _) = snapshot.FindNearest(mouseX);
 
             // ✅ Code 1 style label text
             lblCursorValue.Text =
@@ -2237,6 +2444,30 @@ namespace FRCM
             }
         }
 
+        private void logConfigurationToolStripMenuItem_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                UpdateStatus("📝 Opening Log Configuration...");
+                using (var logConfigForm = new FormLogConfiguration(_ChannelClient, _loginRole))
+                {
+                    var result = logConfigForm.ShowDialog(this);
+                    if (result == DialogResult.OK)
+                    {
+                        UpdateStatus("✅ Log configuration saved successfully");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                UpdateStatus($"❌ Error opening Log Configuration: {ex.Message}");
+                MessageBox.Show($"Error opening Log Configuration:\n\n{ex.Message}",
+                    "Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
         private void systemHealthToolStripMenuItem_Click(object? sender, EventArgs e)
         {
             try
@@ -2275,6 +2506,26 @@ namespace FRCM
             {
                 UpdateStatus($"❌ Error opening Relay Mapping: {ex.Message}");
                 MessageBox.Show($"Error opening Relay Mapping:\n\n{ex.Message}",
+                    "Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private void atpToolStripMenuItem_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                UpdateStatus("📋 Opening ATP Form...");
+                using (var atpForm = new AtpForm(_configurationService, _temperatureDataService, _ChannelClient))
+                {
+                    atpForm.ShowDialog(this);
+                }
+            }
+            catch (Exception ex)
+            {
+                UpdateStatus($"❌ Error opening ATP Form: {ex.Message}");
+                MessageBox.Show($"Error opening ATP Form:\n\n{ex.Message}",
                     "Error",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
@@ -2621,6 +2872,50 @@ namespace FRCM
                         }
                         return;
                     }
+
+                    // -------- GET DTS CONNECTION RESPONSE --------
+                    if (msgTypeStr == "GetDtsConnection_response")
+                    {
+                        if (json.TryGetProperty("Payload", out var payload) &&
+                            payload.TryGetProperty("Success", out var success) &&
+                            success.GetBoolean())
+                        {
+                            string ip = payload.TryGetProperty("IpAddress", out var ipProp) ? ipProp.GetString() ?? "" : "";
+                            int port = payload.TryGetProperty("Port", out var portProp) ? portProp.GetInt32() : 3001;
+                            
+                            var ipConfigInstance = FormIpConfiguration.Instance;
+                            if (ipConfigInstance != null && !ipConfigInstance.IsDisposed)
+                            {
+                                ipConfigInstance.SetDtsConnection(ip, port);
+                            }
+                        }
+                        return;
+                    }
+
+                    // -------- UPDATE DTS CONNECTION RESPONSE --------
+                    if (msgTypeStr == "UpdateDtsConnection_response")
+                    {
+                        if (json.TryGetProperty("Payload", out var payload) &&
+                            payload.TryGetProperty("Success", out var success))
+                        {
+                            var ipConfigInstance = FormIpConfiguration.Instance;
+                            if (ipConfigInstance != null && !ipConfigInstance.IsDisposed)
+                            {
+                                if (success.GetBoolean())
+                                {
+                                    ipConfigInstance.OnUpdateDtsConnectionSuccess();
+                                }
+                                else
+                                {
+                                    string error = payload.TryGetProperty("Error", out var errProp)
+                                        ? errProp.GetString() ?? "Failed to update DTS connection settings"
+                                        : "Failed to update DTS connection settings";
+                                    ipConfigInstance.OnUpdateDtsConnectionFailure(error);
+                                }
+                            }
+                        }
+                        return;
+                    }
                 }
 
                 // Handle batched zone state updates (more efficient - all zones in one message)
@@ -2932,6 +3227,9 @@ namespace FRCM
                     }
                 }
 
+                // FM-07: Double-buffered snapshot promote
+                var snapshot = _traceCache.Update(distances, temperatures);
+
                 // Cache latest graph data
                 if (isZoneSelected)
                 {
@@ -2948,6 +3246,15 @@ namespace FRCM
                         new List<double>(distances),
                         new List<double>(temperatures)
                     );
+
+                    if (FormTemperatureCorrection.Instance != null && !FormTemperatureCorrection.Instance.IsDisposed)
+                    {
+                        FormTemperatureCorrection.Instance.UpdateLiveChannelData(
+                            _selectedChannelId,
+                            distances.ToArray(),
+                            temperatures.ToArray()
+                        );
+                    }
                 }
                 // =========================================
                 // CLEAR OLD GRAPH DATA ONLY
@@ -2961,8 +3268,8 @@ namespace FRCM
                 // ADD LIVE SCATTER
                 // =========================================
                 _liveScatter = formsPlot1.Plot.Add.Scatter(
-                    distances.ToArray(),
-                    temperatures.ToArray());
+                    snapshot.Distances,
+                    snapshot.Temperatures);
 
                 _liveScatter.Color = ScottPlot.Colors.Blue;
                 _liveScatter.LineWidth = 2;
@@ -4063,12 +4370,19 @@ namespace FRCM
         /// </summary>
         private void SetConfigurationControlsEnabled(bool enabled)
         {
-            // Disable/Enable Configuration menu and its items
-            Configuration.Enabled = enabled;
+            // Keep top-level Configuration menu accessible so Temperature Correction can be opened during active measurement
+            Configuration.Enabled = true;
+
+            // Disable configuration menus that must not be changed during active measurement
             channelZoneConfigurationToolStripMenuItem.Enabled = enabled;
+            usbConfigurationToolStripMenuItem.Enabled = enabled;
+            dtsCalibrationToolStripMenuItem.Enabled = enabled;
             loadConfigurationFileToolStripMenuItem.Enabled = enabled;
             saveConfigurationFileToolStripMenuItem.Enabled = enabled;
             iPConfigurationToolStripMenuItem.Enabled = enabled;
+
+            // Temperature correction is allowed during active measurement (matches Upper Software)
+            temperatureCorrectionToolStripMenuItem.Enabled = true;
 
             // Disable/Enable System Configuration in Admin menu
             systemConfigurationToolStripMenuItem.Enabled = enabled;
@@ -4134,6 +4448,9 @@ namespace FRCM
                 ActiveAlarm.Instance.ActiveChannelsChanged -= OnActiveChannelsChanged;
                 ActiveAlarm.Instance.ActiveZonesChanged -= OnActiveZonesChanged;
             }
+
+            // FM-05: Stop Dual-Port Health Watchdog
+            StopDualPortHealthWatchdog();
 
             await _wsClient.DisconnectAsync();
             base.OnFormClosing(e);
@@ -4906,10 +5223,15 @@ namespace FRCM
                 // No cached data: Clear lists for a fresh start
                 distances.Clear();
                 temperatures.Clear();
+                _traceCache.Clear();
+            }
+            else
+            {
+                _traceCache.Update(distances, temperatures);
             }
 
             // Add temperature graph
-            _liveScatter = formsPlot1.Plot.Add.Scatter(distances, temperatures);
+            _liveScatter = formsPlot1.Plot.Add.Scatter(_traceCache.FrontBuffer.Distances, _traceCache.FrontBuffer.Temperatures);
             _liveScatter.Color = ScottPlot.Colors.Blue;
             _liveScatter.LineWidth = 2;
             _liveScatter.MarkerSize = 0;
@@ -5073,7 +5395,20 @@ namespace FRCM
                 _channelGraphCache[
                     _selectedChannelId
                 ] = (x, y);
+
+                if (FormTemperatureCorrection.Instance != null && !FormTemperatureCorrection.Instance.IsDisposed)
+                {
+                    FormTemperatureCorrection.Instance.UpdateLiveChannelData(
+                        _selectedChannelId,
+                        x.ToArray(),
+                        y.ToArray()
+                    );
+                }
             }
+
+            // FM-07: Double-buffered snapshot promote
+            var snapshot = _traceCache.Update(x, y);
+
             // =========================================
             // REMOVE ONLY OLD SCATTER
             // DO NOT CLEAR THE PLOT
@@ -5089,8 +5424,8 @@ namespace FRCM
             // =========================================
 
             _liveScatter = formsPlot1.Plot.Add.Scatter(
-                x.ToArray(),
-                y.ToArray());
+                snapshot.Distances,
+                snapshot.Temperatures);
 
             _liveScatter.Color = ScottPlot.Colors.Blue;
             _liveScatter.LineWidth = 2;
@@ -7442,6 +7777,100 @@ namespace FRCM
             {
                 FormUsbConfiguration.Instance.Show();
                 FormUsbConfiguration.Instance.BringToFront();
+            }
+        }
+
+        private void dtsCalibrationToolStripMenuItem_Click(object? sender, EventArgs e)
+        {
+            UpdateStatus("Opening DTS Hardware Configuration...");
+
+            if (FormDtsCalibration.Instance == null || FormDtsCalibration.Instance.IsDisposed)
+            {
+                var form = new FormDtsCalibration(_wsClient, _loginRole);
+
+                form.DtsOperationStatus += msg =>
+                {
+                    UpdateStatus(msg);
+                };
+
+                form.DtsCalibrationClosed += () =>
+                {
+                    UpdateStatus("DTS Hardware Configuration closed");
+                };
+
+                form.Show(this);
+            }
+            else
+            {
+                FormDtsCalibration.Instance.Show();
+                FormDtsCalibration.Instance.BringToFront();
+            }
+        }
+
+        private void temperatureCorrectionToolStripMenuItem_Click(object? sender, EventArgs e)
+        {
+            UpdateStatus("Opening Temperature Correction...");
+
+            if (FormTemperatureCorrection.Instance == null || FormTemperatureCorrection.Instance.IsDisposed)
+            {
+                var form = new FormTemperatureCorrection(_wsClient, _loginRole);
+
+                form.OperationStatus += msg =>
+                {
+                    UpdateStatus(msg);
+                };
+
+                form.TemperatureCorrectionClosed += () =>
+                {
+                    UpdateStatus("Temperature Correction closed");
+                };
+
+                form.ChannelDataRequest = (ch) =>
+                {
+                    if (_channelGraphCache.TryGetValue(ch, out var c) && c.distances != null && c.distances.Count > 0)
+                    {
+                        return (c.distances.ToArray(), c.temperatures.ToArray());
+                    }
+                    if (ch == _selectedChannelId && _selectedZoneId > 0 && _zoneGraphCache.TryGetValue((ch, _selectedZoneId), out var zc) && zc.distances != null && zc.distances.Count > 0)
+                    {
+                        return (zc.distances.ToArray(), zc.temperatures.ToArray());
+                    }
+                    return null;
+                };
+
+                // Seed all available channel curves immediately
+                foreach (var kvp in _channelGraphCache)
+                {
+                    if (kvp.Value.distances != null && kvp.Value.distances.Count > 0)
+                    {
+                        form.UpdateLiveChannelData(kvp.Key, kvp.Value.distances.ToArray(), kvp.Value.temperatures.ToArray());
+                    }
+                }
+
+                // If currently selected channel only exists in zone cache, seed it as well
+                if (_selectedChannelId > 0 && !_channelGraphCache.ContainsKey(_selectedChannelId) && _selectedZoneId > 0)
+                {
+                    if (_zoneGraphCache.TryGetValue((_selectedChannelId, _selectedZoneId), out var zoneCache) && zoneCache.distances != null && zoneCache.distances.Count > 0)
+                    {
+                        form.UpdateLiveChannelData(_selectedChannelId, zoneCache.distances.ToArray(), zoneCache.temperatures.ToArray());
+                    }
+                }
+
+                form.Show(this);
+            }
+            else
+            {
+                // Refresh existing instance with latest cache
+                foreach (var kvp in _channelGraphCache)
+                {
+                    if (kvp.Value.distances != null && kvp.Value.distances.Count > 0)
+                    {
+                        FormTemperatureCorrection.Instance.UpdateLiveChannelData(kvp.Key, kvp.Value.distances.ToArray(), kvp.Value.temperatures.ToArray());
+                    }
+                }
+
+                FormTemperatureCorrection.Instance.Show();
+                FormTemperatureCorrection.Instance.BringToFront();
             }
         }
 

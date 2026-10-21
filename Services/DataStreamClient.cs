@@ -3,6 +3,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 
 namespace FRCM.Services
@@ -26,6 +27,36 @@ namespace FRCM.Services
         private string _host = "192.168.0.128";
         private int _port = 6165;
         private bool _disposed = false;
+
+        // FM-04: Dedicated background ingestion thread with AboveNormal priority
+        private Thread? _ingestionThread;
+
+        // FM-06: Bounded ingestion channel (capacity 100, DropOldest policy) to prevent UI lag / memory overflow
+        private Channel<IngestFrame>? _ingestChannel;
+
+        private readonly struct IngestFrame
+        {
+            public readonly bool IsBinary;
+            public readonly byte[]? BinaryData;
+            public readonly int Length;
+            public readonly string? TextData;
+
+            public IngestFrame(byte[] binaryData, int length)
+            {
+                IsBinary = true;
+                BinaryData = binaryData;
+                Length = length;
+                TextData = null;
+            }
+
+            public IngestFrame(string textData)
+            {
+                IsBinary = false;
+                BinaryData = null;
+                Length = 0;
+                TextData = textData;
+            }
+        }
 
         // Delta broadcasting: per-channel trace cache for merging delta updates.
         // Key: channelId, Value: sorted dictionary of position → temperature
@@ -55,6 +86,11 @@ namespace FRCM.Services
         /// Gets whether the client is connected to the data stream server.
         /// </summary>
         public bool IsConnected => _client?.State == WebSocketState.Open;
+
+        /// <summary>
+        /// Timestamp of the most recent data frame received on the data stream (FM-05).
+        /// </summary>
+        public DateTime LastDataReceivedUtc { get; private set; } = DateTime.MinValue;
 
         /// <summary>
         /// Gets the host address used for the current/last connection.
@@ -93,7 +129,22 @@ namespace FRCM.Services
 
             _client = new ClientWebSocket();
 
-            var uri = new Uri($"ws://{host}:{port}/data_stream/");
+            // Configure TLS/SSL certificate validation for secure connections
+            if (Program.FrmcUseSecure)
+            {
+                // Bypasses SSL certificate errors for self-signed certificates in dev/testing environments.
+                _client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) =>
+                {
+                    if (sslPolicyErrors != System.Net.Security.SslPolicyErrors.None)
+                    {
+                        Console.WriteLine($"[DATA STREAM WARNING] SSL validation errors: {sslPolicyErrors} for subject {certificate?.Subject}");
+                    }
+                    return true; // Bypass validation errors (Self-signed development bypass)
+                };
+            }
+
+            // Centralized URI generation scheme (updates dynamically based on configuration)
+            var uri = Program.GetDataStreamUri(host, port);
             Console.WriteLine($"[DATA STREAM] Connecting to {uri}...");
 
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -104,8 +155,25 @@ namespace FRCM.Services
 
                 Connected?.Invoke(this, EventArgs.Empty);
 
-                // Start listening for messages
-                _ = Task.Run(() => StartListeningAsync());
+                // FM-06: Create BoundedChannel with DropOldest mode (capacity 100)
+                _ingestChannel = Channel.CreateBounded<IngestFrame>(new BoundedChannelOptions(100)
+                {
+                    FullMode = BoundedChannelFullMode.DropOldest,
+                    SingleWriter = true,
+                    SingleReader = true
+                });
+
+                // Start channel consumer loop
+                _ = Task.Run(() => ProcessIngestChannelAsync());
+
+                // FM-04: Dedicated background ingestion thread with AboveNormal priority
+                _ingestionThread = new Thread(IngestionThreadWorker)
+                {
+                    Name = "FRCM-BinaryStreamConsumer",
+                    IsBackground = true,
+                    Priority = ThreadPriority.AboveNormal
+                };
+                _ingestionThread.Start();
             }
             catch (OperationCanceledException)
             {
@@ -115,6 +183,13 @@ namespace FRCM.Services
             catch (Exception ex)
             {
                 Console.WriteLine($"[DATA STREAM] Connection failed: {ex.Message}");
+                
+                // Detailed handling for TLS handshake/validation failures
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"[DATA STREAM DETAIL] Inner exception: {ex.InnerException.Message}");
+                }
+                
                 throw new Exception($"Failed to connect to FRMC data stream server: {ex.Message}", ex);
             }
         }
@@ -219,9 +294,45 @@ namespace FRCM.Services
             }
         }
 
-        private async Task StartListeningAsync()
+        /// <summary>
+        /// Consumer loop processing frames from the bounded channel (FM-06).
+        /// Decouples raw socket frame ingestion from JSON/binary deserialization and event dispatching.
+        /// </summary>
+        private async Task ProcessIngestChannelAsync()
         {
-            Console.WriteLine("[DATA STREAM LISTENER] Starting...");
+            Console.WriteLine("[DATA STREAM PROCESSOR] Ingestion queue processor started (FM-06 BoundedChannel max: 100)");
+            if (_ingestChannel == null) return;
+
+            try
+            {
+                while (await _ingestChannel.Reader.WaitToReadAsync())
+                {
+                    while (_ingestChannel.Reader.TryRead(out var frame))
+                    {
+                        if (frame.IsBinary && frame.BinaryData != null)
+                        {
+                            ProcessBinaryMessage(frame.BinaryData, frame.Length);
+                        }
+                        else if (!string.IsNullOrEmpty(frame.TextData))
+                        {
+                            ProcessMessage(frame.TextData);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[DATA STREAM PROCESSOR] Channel processor error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Dedicated ingestion worker thread with AboveNormal priority (FM-04).
+        /// Reads raw WebSocket packets as fast as possible from the network buffer and writes to the bounded queue.
+        /// </summary>
+        private void IngestionThreadWorker()
+        {
+            Console.WriteLine("[DATA STREAM INGESTION THREAD] Started with priority: AboveNormal (FM-04)");
             var buffer = new byte[262144]; // 256KB — covers up to ~65K points (~26km at 0.4m)
             var builder = new StringBuilder();
             bool normalClosure = false;
@@ -240,7 +351,7 @@ namespace FRCM.Services
             {
                 try
                 {
-                    var result = await _client.ReceiveAsync(new ArraySegment<byte>(buffer), token);
+                    var result = _client.ReceiveAsync(new ArraySegment<byte>(buffer), token).GetAwaiter().GetResult();
 
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
@@ -262,7 +373,8 @@ namespace FRCM.Services
                         if (result.EndOfMessage)
                         {
                             inBinaryMessage = false;
-                            ProcessBinaryMessage(binaryStream.GetBuffer(), (int)binaryStream.Length);
+                            byte[] payload = binaryStream.ToArray();
+                            _ingestChannel?.Writer.TryWrite(new IngestFrame(payload, payload.Length));
                         }
                         continue;
                     }
@@ -274,7 +386,7 @@ namespace FRCM.Services
                         var msg = builder.ToString();
                         builder.Clear();
 
-                        ProcessMessage(msg);
+                        _ingestChannel?.Writer.TryWrite(new IngestFrame(msg));
                     }
                 }
                 catch (OperationCanceledException)
@@ -295,6 +407,7 @@ namespace FRCM.Services
                 }
             }
 
+            _ingestChannel?.Writer.TryComplete();
             Console.WriteLine($"[DATA STREAM LISTENER] Exited. Client state: {_client?.State}");
 
             if (!normalClosure && _client?.State != WebSocketState.Open)
@@ -425,6 +538,8 @@ namespace FRCM.Services
                     dataPoints = msg.Points;
                 }
 
+                LastDataReceivedUtc = DateTime.UtcNow;
+
                 TemperatureDataReceived?.Invoke(this, new TemperatureDataEventArgs
                 {
                     ChannelId = msg.ChannelId,
@@ -502,6 +617,8 @@ namespace FRCM.Services
                     dataPoints = receivedPoints;
                 }
 
+                LastDataReceivedUtc = DateTime.UtcNow;
+
                 // Fire event with complete trace (processor/chart always gets full data)
                 TemperatureDataReceived?.Invoke(this, new TemperatureDataEventArgs
                 {
@@ -531,6 +648,12 @@ namespace FRCM.Services
                 }
                 catch (ObjectDisposedException) { }
             }
+
+            try
+            {
+                _ingestChannel?.Writer.TryComplete();
+            }
+            catch (Exception) { }
 
             try
             {

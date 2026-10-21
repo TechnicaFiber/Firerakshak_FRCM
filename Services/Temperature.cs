@@ -1,4 +1,4 @@
-﻿using FireRakshak.FRMC.Core.Models;
+using FireRakshak.FRMC.Core.Models;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -15,7 +15,8 @@ namespace FRCM
         private readonly IAuthService _authService;
         private readonly ILogger _logger;
         private readonly ConcurrentDictionary<int, TemperatureDataPoint[]> _channelData = new ConcurrentDictionary<int, TemperatureDataPoint[]>();
-        private Uri _webSocketServerUri => new Uri($"ws://{Program.FrmcHost}:{Program.FrmcControlPort}/general_ws/");
+        // Centralized URI generation scheme (updates dynamically based on configuration)
+        private Uri _webSocketServerUri => Program.GetControlWebSocketUri();
         public event EventHandler<TemperatureDataUpdateEventArgs>? TemperatureDataUpdated;
         public int MaxChannels { get; } = 8;
 

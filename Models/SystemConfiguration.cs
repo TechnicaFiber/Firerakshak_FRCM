@@ -79,5 +79,51 @@ namespace FRCM.Models
         /// Default: 10 seconds
         /// </summary>
         public int DtsCommunicationTimeoutSeconds { get; set; } = 10;
+
+        // ============================================================
+        // LOGGING & RETENTION CONFIGURATION (Configurable from DTSCM)
+        // ============================================================
+
+        /// <summary>
+        /// Enables automated ZIP archiving and storage capacity management for log files.
+        /// Default: true
+        /// </summary>
+        public bool LogRetentionEnabled { get; set; } = true;
+
+        /// <summary>
+        /// Maximum retention age in days for historical log archives. Archives older than this will be pruned.
+        /// Default: 14 days
+        /// </summary>
+        public int LogMaxAgeDays { get; set; } = 14;
+
+        /// <summary>
+        /// Maximum total storage quota for logs in MB.
+        /// Default: 10240 MB (10 GB)
+        /// </summary>
+        public long LogTotalQuotaMB { get; set; } = 10240;
+
+        /// <summary>
+        /// High watermark storage ceiling in MB. When log storage exceeds this, oldest archives are pruned.
+        /// Default: 9216 MB (9.0 GB)
+        /// </summary>
+        public long LogHighWatermarkMB { get; set; } = 9216;
+
+        /// <summary>
+        /// Low watermark storage target in MB after pruning.
+        /// Default: 7680 MB (7.5 GB)
+        /// </summary>
+        public long LogLowWatermarkMB { get; set; } = 7680;
+
+        /// <summary>
+        /// Frequency in hours to check and archive logs.
+        /// Default: 12 hours
+        /// </summary>
+        public int LogCheckIntervalHours { get; set; } = 12;
+
+        /// <summary>
+        /// Minimum logging severity level (Debug, Information, Warning, Error).
+        /// Default: "Information"
+        /// </summary>
+        public string MinimumLogLevel { get; set; } = "Information";
     }
 }

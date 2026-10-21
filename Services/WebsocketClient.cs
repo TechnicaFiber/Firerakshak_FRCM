@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 using System;
 using System.Collections.Concurrent;
@@ -21,6 +21,10 @@ namespace FRCM
         private CancellationTokenSource _cts = new();
         private readonly object _ctsLock = new();
 
+        // True only when we intentionally disconnect (user logout/app close)
+        // Prevents ConnectionLost from firing on voluntary disconnects
+        private bool _isDisconnecting = false;
+
         public bool IsConnected => _client?.State == WebSocketState.Open;
 
         public event EventHandler<string>? MessageReceived;
@@ -31,6 +35,7 @@ namespace FRCM
         private string? _storedUsername;
         private string? _storedRole;
         private DateTime _tokenExpiration = DateTime.MinValue;
+        private CancellationTokenSource? _tokenRefreshCts;
 
         // JWT Secret loaded from configuration (synced with FRMC)
         private readonly string _jwtSecret;
@@ -98,7 +103,24 @@ namespace FRCM
                 }
             }
 
+            _isDisconnecting = false; // Reset on every new connection attempt
             _client = new ClientWebSocket();
+
+            // Handle WSS connections and configure TLS/SSL validation
+            if (uri.Scheme.Equals("wss", StringComparison.OrdinalIgnoreCase) || Program.FrmcUseSecure)
+            {
+                // Configure RemoteCertificateValidationCallback for self-signed certificates or secure communication
+                _client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) =>
+                {
+                    // For development / testing environments using self-signed certs, we log policy errors and allow connection.
+                    // In a strict production environment, check if errors == SslPolicyErrors.None.
+                    if (sslPolicyErrors != System.Net.Security.SslPolicyErrors.None)
+                    {
+                        Console.WriteLine($"[WS WARNING] SSL certificate validation errors: {sslPolicyErrors} for subject {certificate?.Subject}");
+                    }
+                    return true; // Bypass validation for self-signed development certificates
+                };
+            }
 
             // Use stored token if available and valid, otherwise use provided token
             string tokenToUse = token;
@@ -130,6 +152,13 @@ namespace FRCM
             {
                 Console.WriteLine($"❌ WebSocket connection failed: {ex.Message}");
                 Console.WriteLine($"[WS] Exception type: {ex.GetType().Name}");
+                
+                // Detailed handling for TLS handshake/validation failures
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"[WS DETAIL] Inner exception: {ex.InnerException.Message}");
+                }
+                
                 Console.WriteLine($"[WS] Stack trace: {ex.StackTrace}");
                 throw new Exception($"Failed to connect to FRMC server: {ex.Message}", ex);
             }
@@ -140,7 +169,7 @@ namespace FRCM
         }
 
 
-        public async Task ConnectAsync(string host = "", bool useSecure = false)
+        public async Task ConnectAsync(string host = "", bool useSecure = false, int timeoutSeconds = 10)
         {
             if (_client != null && _client.State == WebSocketState.Open)
                 return;
@@ -155,20 +184,23 @@ namespace FRCM
                 }
             }
 
+            _isDisconnecting = false; // Reset on every new connection attempt
             _client = new ClientWebSocket();
 
-            if (useSecure)
+            bool secure = useSecure || Program.FrmcUseSecure;
+
+            if (secure)
             {
-                // WARNING: This bypasses SSL certificate validation - only use for development/testing
-                // In production, implement proper certificate validation
-                Console.WriteLine("[WS WARNING] SSL certificate validation is disabled - not recommended for production");
+                // Configure SSL certificate validation (RemoteCertificateValidationCallback)
+                // Bypasses certificate verification for development/testing environments.
+                Console.WriteLine("[WS WARNING] SSL certificate validation callback configured");
                 _client.Options.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) =>
                 {
                     if (sslPolicyErrors != System.Net.Security.SslPolicyErrors.None)
                     {
-                        Console.WriteLine($"[WS WARNING] SSL policy errors: {sslPolicyErrors}");
+                        Console.WriteLine($"[WS WARNING] SSL policy errors: {sslPolicyErrors} for subject {certificate?.Subject}");
                     }
-                    return true; // Accept all certificates - INSECURE
+                    return true; // Accept all certificates (Self-signed development bypass)
                 };
             }
 
@@ -182,14 +214,17 @@ namespace FRCM
                 Console.WriteLine("[RECONNECT] Using stored token for authentication");
             }
 
-            _uri = useSecure
-                ? new Uri($"wss://{host}:5001/service_ws/?token={Uri.EscapeDataString(jwtToken)}")
+            // Centralized secure path generation preserving legacy 5001/service_ws option
+            _uri = secure
+                ? (Program.FrmcUseSecure
+                    ? new Uri($"wss://{host}:{Program.FrmcControlPort}/general_ws/?token={Uri.EscapeDataString(jwtToken)}")
+                    : new Uri($"wss://{host}:5001/service_ws/?token={Uri.EscapeDataString(jwtToken)}"))
                 : new Uri($"ws://{host}:{Program.FrmcControlPort}/general_ws/?token={Uri.EscapeDataString(jwtToken)}");
 
-            Console.WriteLine($"[WS] Attempting to connect to {_uri}...");
+            Console.WriteLine($"[WS] Attempting to connect to {_uri} (timeout: {timeoutSeconds}s)...");
 
             // Add timeout to connection
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
             try
             {
                 await _client.ConnectAsync(_uri, cts.Token);
@@ -197,12 +232,16 @@ namespace FRCM
             }
             catch (OperationCanceledException)
             {
-                Console.WriteLine("❌ WebSocket connection timed out after 10 seconds");
-                throw new TimeoutException("Failed to connect to FRMC server. Connection timed out after 10 seconds.");
+                Console.WriteLine($"❌ WebSocket connection timed out after {timeoutSeconds} seconds");
+                throw new TimeoutException($"Failed to connect to FRMC server. Connection timed out after {timeoutSeconds} seconds.");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ WebSocket connection failed: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"[WS DETAIL] Inner exception: {ex.InnerException.Message}");
+                }
                 throw new Exception($"Failed to connect to FRMC server: {ex.Message}", ex);
             }
 
@@ -212,7 +251,11 @@ namespace FRCM
         private async Task EnsureConnectedAsync()
         {
             if (_client == null || _client.State != WebSocketState.Open)
+            {
                 await ConnectAsync();
+                // ConnectAsync already starts the listener internally via Task.Run
+                // No extra step needed here.
+            }
         }
 
         private string GenerateJwt()
@@ -346,10 +389,11 @@ namespace FRCM
             }
             Console.WriteLine($"[WS LISTENER] Listener exited. Client state: {_client?.State}");
 
-            // Fire ConnectionLost event if the connection was lost unexpectedly
-            if (!normalClosure && _client?.State != WebSocketState.Open)
+            // Fire ConnectionLost whenever the server drops us - whether via a clean close frame
+            // (normalClosure=true) or an abrupt drop (exception). Only skip if WE chose to disconnect.
+            if (!_isDisconnecting)
             {
-                Console.WriteLine("[WS LISTENER] Connection lost - firing ConnectionLost event");
+                Console.WriteLine("[WS LISTENER] Connection lost (server-side) - firing ConnectionLost event");
                 ConnectionLost?.Invoke(this, EventArgs.Empty);
             }
         }
@@ -357,84 +401,109 @@ namespace FRCM
 
         public async Task<JsonElement?> SendCommandAsync(string command, object payload)
         {
-            await EnsureConnectedAsync();
-
-            var jsonMsg = JsonSerializer.Serialize(new
+            try
             {
-                MessageType = command,
-                Payload = payload
-            });
+                await EnsureConnectedAsync();
 
-            string expectedResponseType = command + "_response";
-
-            var waiter = new TaskCompletionSource<JsonElement>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-
-            var queue = _pendingByResponse.GetOrAdd(
-                expectedResponseType,
-                _ => new ConcurrentQueue<TaskCompletionSource<JsonElement>>());
-
-            queue.Enqueue(waiter);
-
-            // Send AFTER registering waiter
-            var buffer = Encoding.UTF8.GetBytes(jsonMsg);
-            await _client!.SendAsync(
-                new ArraySegment<byte>(buffer),
-                WebSocketMessageType.Text,
-                true,
-                CancellationToken.None);
-
-            // Use longer timeout for audit trail and event history (can be large datasets)
-            // ✅ FIX: Increased default timeout from 5s to 15s to handle large zone broadcasts
-            // For long channels (>5km), zone state broadcasts may take longer to complete
-            int timeoutSeconds = 15; // Default timeout for most operations
-            if (expectedResponseType == "get_audit_trail_response" ||
-                expectedResponseType == "get_event_history_response" ||
-                expectedResponseType == "GetZoneConfiguration_response")
-            {
-                timeoutSeconds = 30; // 30 seconds for large data queries
-            }
-            else if (expectedResponseType == "ResetAllConfiguration_response")
-            {
-                timeoutSeconds = 60; // Reset triggers Modbus reinitialization on Linux which can take time
-            }
-
-            var completed = await Task.WhenAny(
-                waiter.Task,
-                Task.Delay(TimeSpan.FromSeconds(timeoutSeconds))
-            );
-
-            if (completed == waiter.Task)
-            {
-                Console.WriteLine($"[WS] Response received for {expectedResponseType}");
-                return await waiter.Task;
-            }
-
-            // BUGFIX: Clean up timed-out waiter to prevent memory leak
-            // Try to cancel the waiter and remove it from the queue
-            waiter.TrySetCanceled();
-
-            // Clean up the queue - remove cancelled/completed waiters
-            if (_pendingByResponse.TryGetValue(expectedResponseType, out var pendingQueue))
-            {
-                // Drain and re-enqueue only non-completed items (excluding our timed-out waiter)
-                var itemsToKeep = new List<TaskCompletionSource<JsonElement>>();
-                while (pendingQueue.TryDequeue(out var item))
+                var jsonMsg = JsonSerializer.Serialize(new
                 {
-                    if (!item.Task.IsCompleted && item != waiter)
+                    MessageType = command,
+                    Payload = payload
+                });
+
+                string expectedResponseType = command + "_response";
+
+                var waiter = new TaskCompletionSource<JsonElement>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+
+                var queue = _pendingByResponse.GetOrAdd(
+                    expectedResponseType,
+                    _ => new ConcurrentQueue<TaskCompletionSource<JsonElement>>());
+
+                queue.Enqueue(waiter);
+
+                // Send AFTER registering waiter
+                var buffer = Encoding.UTF8.GetBytes(jsonMsg);
+                await _client!.SendAsync(
+                    new ArraySegment<byte>(buffer),
+                    WebSocketMessageType.Text,
+                    true,
+                    CancellationToken.None);
+
+                // Use longer timeout for audit trail and event history (can be large datasets)
+                // ✅ FIX: Increased default timeout from 5s to 15s to handle large zone broadcasts
+                // For long channels (>5km), zone state broadcasts may take longer to complete
+                int timeoutSeconds = 15; // Default timeout for most operations
+                if (expectedResponseType == "get_audit_trail_response" ||
+                    expectedResponseType == "get_event_history_response" ||
+                    expectedResponseType == "GetZoneConfiguration_response" ||
+                    expectedResponseType == "GetDtsCalibration_response" ||
+                    expectedResponseType == "SetDtsCalibration_response")
+                {
+                    timeoutSeconds = 30; // 30 seconds for large data queries and hardware calibration
+                }
+                else if (expectedResponseType == "ResetAllConfiguration_response")
+                {
+                    timeoutSeconds = 60; // Reset triggers Modbus reinitialization on Linux which can take time
+                }
+
+                var completed = await Task.WhenAny(
+                    waiter.Task,
+                    Task.Delay(TimeSpan.FromSeconds(timeoutSeconds))
+                );
+
+                if (completed == waiter.Task)
+                {
+                    Console.WriteLine($"[WS] Response received for {expectedResponseType}");
+                    return await waiter.Task;
+                }
+
+                // BUGFIX: Clean up timed-out waiter to prevent memory leak
+                // Try to cancel the waiter and remove it from the queue
+                waiter.TrySetCanceled();
+
+                // Clean up the queue - remove cancelled/completed waiters
+                if (_pendingByResponse.TryGetValue(expectedResponseType, out var pendingQueue))
+                {
+                    // Drain and re-enqueue only non-completed items (excluding our timed-out waiter)
+                    var itemsToKeep = new List<TaskCompletionSource<JsonElement>>();
+                    while (pendingQueue.TryDequeue(out var item))
                     {
-                        itemsToKeep.Add(item);
+                        if (!item.Task.IsCompleted && item != waiter)
+                        {
+                            itemsToKeep.Add(item);
+                        }
+                    }
+                    // Re-enqueue valid items
+                    foreach (var item in itemsToKeep)
+                    {
+                        pendingQueue.Enqueue(item);
                     }
                 }
-                // Re-enqueue valid items
-                foreach (var item in itemsToKeep)
-                {
-                    pendingQueue.Enqueue(item);
-                }
-            }
 
-            Console.WriteLine($"[WS TIMEOUT] Waiting for {expectedResponseType} - no response after {timeoutSeconds} seconds");
-            return null;
+                Console.WriteLine($"[WS TIMEOUT] Waiting for {expectedResponseType} - no response after {timeoutSeconds} seconds");
+                return null;
+            }
+            catch (WebSocketException wsEx)
+            {
+                Console.WriteLine($"[WS SEND ERROR] WebSocket error sending '{command}': {wsEx.Message}");
+                return null;
+            }
+            catch (InvalidOperationException ioEx)
+            {
+                Console.WriteLine($"[WS SEND ERROR] Invalid operation sending '{command}' (connection may be closed): {ioEx.Message}");
+                return null;
+            }
+            catch (OperationCanceledException)
+            {
+                Console.WriteLine($"[WS SEND ERROR] '{command}' was cancelled (connection lost).");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WS SEND ERROR] Unexpected error sending '{command}': {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
         }
 
         public async Task SendAsync(string message)
@@ -448,6 +517,7 @@ namespace FRCM
 
         public async Task DisconnectAsync()
         {
+            _isDisconnecting = true; // Mark as intentional so ConnectionLost is NOT fired
             if (_client != null && _client.State == WebSocketState.Open)
                 await _client.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closed", CancellationToken.None);
         }
@@ -586,10 +656,13 @@ namespace FRCM
                         _storedToken = loginResponse.Token;
                         _storedUsername = loginResponse.Username;
                         _storedRole = loginResponse.Role;
-                        _tokenExpiration = DateTime.UtcNow.AddHours(1); // JWT tokens typically expire in 1 hour
+                        _tokenExpiration = ExtractExpirationFromJwt(loginResponse.Token);
 
                         Console.WriteLine($"[LOGIN] Successfully logged in as {loginResponse.Username} (Role: {loginResponse.Role})");
                         Console.WriteLine($"[TOKEN] Token stored, expires at {_tokenExpiration:yyyy-MM-dd HH:mm:ss} UTC");
+
+                        // FM-02: Start background TokenRefreshWorker to preemptively renew token before expiration
+                        StartTokenRefreshWorker();
 
                         return loginResponse;
                     }
@@ -609,6 +682,173 @@ namespace FRCM
             {
                 Console.WriteLine($"[LOGIN ERROR] {ex.Message}");
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// FM-02: Parses exp claim from JWT token string to determine exact UTC expiration.
+        /// </summary>
+        private DateTime ExtractExpirationFromJwt(string? token)
+        {
+            if (string.IsNullOrEmpty(token))
+                return DateTime.UtcNow.AddHours(1);
+
+            try
+            {
+                var handler = new JwtSecurityTokenHandler();
+                if (handler.CanReadToken(token))
+                {
+                    var jwt = handler.ReadJwtToken(token);
+                    if (jwt.ValidTo > DateTime.MinValue)
+                    {
+                        return jwt.ValidTo;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TOKEN] Error parsing JWT expiration claim: {ex.Message}");
+            }
+
+            return DateTime.UtcNow.AddHours(1);
+        }
+
+        /// <summary>
+        /// FM-02: Starts background TokenRefreshWorker loop to preemptively renew JWT token before expiration.
+        /// Runs an initial check after 10 seconds, then checks continuously every 5 minutes.
+        /// Preemptively renews token when remaining lifetime < 20 minutes.
+        /// </summary>
+        private void StartTokenRefreshWorker()
+        {
+            StopTokenRefreshWorker();
+
+            _tokenRefreshCts = new CancellationTokenSource();
+            var token = _tokenRefreshCts.Token;
+
+            _ = Task.Run(async () =>
+            {
+                Console.WriteLine("[TOKEN WORKER] FM-02 TokenRefreshWorker loop started (initial: 10s, period: 5m)");
+
+                // Initial check after 10 seconds
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(10), token);
+                    await CheckAndRefreshTokenAsync();
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[TOKEN WORKER ERROR] {ex.Message}");
+                }
+
+                // Continuous periodic check every 5 minutes
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromMinutes(5), token);
+                        if (!IsConnected || string.IsNullOrEmpty(_storedToken))
+                            continue;
+
+                        await CheckAndRefreshTokenAsync();
+                    }
+                    catch (OperationCanceledException) { break; }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[TOKEN WORKER ERROR] {ex.Message}");
+                    }
+                }
+
+                Console.WriteLine("[TOKEN WORKER] FM-02 TokenRefreshWorker stopped.");
+            }, token);
+        }
+
+        /// <summary>
+        /// FM-02: Stops the background TokenRefreshWorker.
+        /// </summary>
+        private void StopTokenRefreshWorker()
+        {
+            if (_tokenRefreshCts != null)
+            {
+                try
+                {
+                    _tokenRefreshCts.Cancel();
+                    _tokenRefreshCts.Dispose();
+                }
+                catch { }
+                _tokenRefreshCts = null;
+            }
+        }
+
+        /// <summary>
+        /// FM-02: Checks if the stored JWT token is nearing expiration and preemptively renews it.
+        /// </summary>
+        public async Task<bool> CheckAndRefreshTokenAsync()
+        {
+            if (string.IsNullOrEmpty(_storedToken) || !IsConnected)
+                return false;
+
+            var remaining = _tokenExpiration - DateTime.UtcNow;
+            Console.WriteLine($"[TOKEN WORKER] Remaining token lifetime: {remaining.TotalMinutes:F1} minutes (Expires: {_tokenExpiration:HH:mm:ss} UTC)");
+
+            // Preemptively refresh when less than 20 minutes remain (or if token has expired)
+            if (remaining.TotalMinutes < 20)
+            {
+                Console.WriteLine("[TOKEN WORKER] Token lifetime under threshold (<20m). Triggering preemptive renewal...");
+                return await RefreshTokenAsync();
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// FM-02: Asynchronously refreshes the active JWT authentication token with FRMC.
+        /// </summary>
+        public async Task<bool> RefreshTokenAsync()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_storedToken))
+                {
+                    Console.WriteLine("[TOKEN REFRESH] Cannot refresh: no stored token available");
+                    return false;
+                }
+
+                Console.WriteLine("[TOKEN REFRESH] Sending refresh_token command to FRMC...");
+                var resp = await SendCommandAsync("refresh_token", new { token = _storedToken });
+
+                if (!resp.HasValue)
+                {
+                    Console.WriteLine("[TOKEN REFRESH] No response received from server");
+                    return false;
+                }
+
+                if (resp.Value.TryGetProperty("Payload", out var payload))
+                {
+                    if (payload.TryGetProperty("Success", out var successElem) && successElem.GetBoolean())
+                    {
+                        string? newToken = payload.TryGetProperty("Token", out var tokenElem) ? tokenElem.GetString() : null;
+                        if (!string.IsNullOrEmpty(newToken))
+                        {
+                            _storedToken = newToken;
+                            _tokenExpiration = ExtractExpirationFromJwt(newToken);
+                            Console.WriteLine($"✅ [TOKEN REFRESH] Token successfully renewed. New expiration: {_tokenExpiration:yyyy-MM-dd HH:mm:ss} UTC");
+                            return true;
+                        }
+                    }
+                    else
+                    {
+                        string message = payload.TryGetProperty("Message", out var msgElem) ? msgElem.GetString() ?? "" : "Token renewal failed";
+                        Console.WriteLine($"❌ [TOKEN REFRESH] Renewal failed: {message}");
+                    }
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[TOKEN REFRESH ERROR] {ex.Message}");
+                return false;
             }
         }
 
@@ -635,6 +875,7 @@ namespace FRCM
         /// </summary>
         public void ClearStoredToken()
         {
+            StopTokenRefreshWorker();
             _storedToken = null;
             _storedUsername = null;
             _storedRole = null;
@@ -794,6 +1035,8 @@ namespace FRCM
 
         public void Dispose()
         {
+            StopTokenRefreshWorker();
+
             lock (_ctsLock)
             {
                 try

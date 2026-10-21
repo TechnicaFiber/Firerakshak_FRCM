@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -14,6 +14,7 @@ namespace FRCM
         Task DisconnectAsync();
         bool IsConnected { get; }
         Task SendAsync(string message);
+        Task<bool> RefreshTokenAsync();
 
     }
 }

@@ -1,4 +1,4 @@
-﻿namespace FRCM
+namespace FRCM
 {
     partial class Form1
     {
@@ -66,6 +66,8 @@
             adminToolStripMenuItem = new ToolStripMenuItem();
             userManagementToolStripMenuItem = new ToolStripMenuItem();
             systemConfigurationToolStripMenuItem = new ToolStripMenuItem();
+            logConfigurationToolStripMenuItem = new ToolStripMenuItem();
+            atpToolStripMenuItem = new ToolStripMenuItem();
             menuStrip1 = new MenuStrip();
             Configuration = new ToolStripMenuItem();
             channelZoneConfigurationToolStripMenuItem = new ToolStripMenuItem();
@@ -74,6 +76,8 @@
             saveConfigurationFileToolStripMenuItem = new ToolStripMenuItem();
             iPConfigurationToolStripMenuItem = new ToolStripMenuItem();
             clockConfigurationToolStripMenuItem = new ToolStripMenuItem();
+            dtsCalibrationToolStripMenuItem = new ToolStripMenuItem();
+            temperatureCorrectionToolStripMenuItem = new ToolStripMenuItem();
             resetAllConfigurationToolStripMenuItem = new ToolStripMenuItem();
             tabControlDisplay = new TabControl();
             tabChannelInformation = new TabPage();
@@ -440,7 +444,7 @@
             // 
             // adminToolStripMenuItem
             // 
-            adminToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { userManagementToolStripMenuItem, systemConfigurationToolStripMenuItem });
+            adminToolStripMenuItem.DropDownItems.AddRange(new ToolStripItem[] { userManagementToolStripMenuItem, systemConfigurationToolStripMenuItem, logConfigurationToolStripMenuItem });
             adminToolStripMenuItem.Name = "adminToolStripMenuItem";
             adminToolStripMenuItem.Size = new Size(81, 29);
             adminToolStripMenuItem.Text = "Admin";
@@ -459,10 +463,24 @@
             systemConfigurationToolStripMenuItem.Text = "System Configuration";
             systemConfigurationToolStripMenuItem.Click += systemConfigurationToolStripMenuItem_Click;
             // 
+            // logConfigurationToolStripMenuItem
+            // 
+            logConfigurationToolStripMenuItem.Name = "logConfigurationToolStripMenuItem";
+            logConfigurationToolStripMenuItem.Size = new Size(285, 34);
+            logConfigurationToolStripMenuItem.Text = "Log Configuration";
+            logConfigurationToolStripMenuItem.Click += logConfigurationToolStripMenuItem_Click;
+            // 
+            // atpToolStripMenuItem
+            // 
+            atpToolStripMenuItem.Name = "atpToolStripMenuItem";
+            atpToolStripMenuItem.Size = new Size(62, 29);
+            atpToolStripMenuItem.Text = "ATP";
+            atpToolStripMenuItem.Click += atpToolStripMenuItem_Click;
+            // 
             // menuStrip1
             // 
             menuStrip1.ImageScalingSize = new Size(24, 24);
-            menuStrip1.Items.AddRange(new ToolStripItem[] { Configuration, monitoringToolStripMenuItem, softwareUpdateToolStripMenuItem, adminToolStripMenuItem, helpToolStripMenuItem, settingsToolStripMenuItem });
+            menuStrip1.Items.AddRange(new ToolStripItem[] { Configuration, monitoringToolStripMenuItem, atpToolStripMenuItem, softwareUpdateToolStripMenuItem, adminToolStripMenuItem, helpToolStripMenuItem, settingsToolStripMenuItem });
             menuStrip1.Location = new Point(0, 0);
             menuStrip1.Name = "menuStrip1";
             menuStrip1.Padding = new Padding(9, 3, 0, 3);
@@ -472,7 +490,7 @@
             // 
             // Configuration
             // 
-            Configuration.DropDownItems.AddRange(new ToolStripItem[] { channelZoneConfigurationToolStripMenuItem, usbConfigurationToolStripMenuItem, loadConfigurationFileToolStripMenuItem, saveConfigurationFileToolStripMenuItem, iPConfigurationToolStripMenuItem, clockConfigurationToolStripMenuItem, resetAllConfigurationToolStripMenuItem });
+            Configuration.DropDownItems.AddRange(new ToolStripItem[] { channelZoneConfigurationToolStripMenuItem, usbConfigurationToolStripMenuItem, dtsCalibrationToolStripMenuItem, temperatureCorrectionToolStripMenuItem, loadConfigurationFileToolStripMenuItem, saveConfigurationFileToolStripMenuItem, iPConfigurationToolStripMenuItem, clockConfigurationToolStripMenuItem, resetAllConfigurationToolStripMenuItem });
             Configuration.Name = "Configuration";
             Configuration.Size = new Size(137, 29);
             Configuration.Text = "Configuration";
@@ -483,6 +501,20 @@
             usbConfigurationToolStripMenuItem.Size = new Size(338, 34);
             usbConfigurationToolStripMenuItem.Text = "USB Configuration";
             usbConfigurationToolStripMenuItem.Click += usbConfigurationToolStripMenuItem_Click;
+            // 
+            // dtsCalibrationToolStripMenuItem
+            // 
+            dtsCalibrationToolStripMenuItem.Name = "dtsCalibrationToolStripMenuItem";
+            dtsCalibrationToolStripMenuItem.Size = new Size(338, 34);
+            dtsCalibrationToolStripMenuItem.Text = "DTS Hardware Configuration";
+            dtsCalibrationToolStripMenuItem.Click += dtsCalibrationToolStripMenuItem_Click;
+            // 
+            // temperatureCorrectionToolStripMenuItem
+            // 
+            temperatureCorrectionToolStripMenuItem.Name = "temperatureCorrectionToolStripMenuItem";
+            temperatureCorrectionToolStripMenuItem.Size = new Size(338, 34);
+            temperatureCorrectionToolStripMenuItem.Text = "Temperature Correction";
+            temperatureCorrectionToolStripMenuItem.Click += temperatureCorrectionToolStripMenuItem_Click;
             // 
             // channelZoneConfigurationToolStripMenuItem
             // 
@@ -1075,8 +1107,10 @@
         private ToolStripMenuItem adminToolStripMenuItem;
         private ToolStripMenuItem userManagementToolStripMenuItem;
         private ToolStripMenuItem systemConfigurationToolStripMenuItem;
+        private ToolStripMenuItem logConfigurationToolStripMenuItem;
         private ToolStripMenuItem systemHealthToolStripMenuItem;
         private ToolStripMenuItem relayMappingToolStripMenuItem;
+        private ToolStripMenuItem atpToolStripMenuItem;
         private MenuStrip menuStrip1;
         private Button refresh;
         private ToolStripMenuItem fRMCCurrentVersionToolStripMenuItem;
@@ -1130,6 +1164,8 @@
         private Button btnResetAxis;
         private ToolStripMenuItem resetAllConfigurationToolStripMenuItem;
         private ToolStripMenuItem clockConfigurationToolStripMenuItem;
+        private ToolStripMenuItem dtsCalibrationToolStripMenuItem;
+        private ToolStripMenuItem temperatureCorrectionToolStripMenuItem;
         private DataGridViewTextBoxColumn colZone;
         private DataGridViewTextBoxColumn colZoneName;
         private DataGridViewTextBoxColumn colStart;

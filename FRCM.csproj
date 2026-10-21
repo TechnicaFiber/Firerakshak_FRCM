@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
 		<OutputType>WinExe</OutputType>
@@ -11,8 +11,17 @@
 		<!-- Suppress nullable reference warnings and unused field warnings -->
 		<NoWarn>CS8600;CS8601;CS8602;CS8604;CS8618;CS8622;CS0169;CS0414;CS1998;CS4014;NU1701;MSB3245</NoWarn>
 		<MSBuildWarningsAsMessages>MSB3245</MSBuildWarningsAsMessages>
+
+		<!-- Preprocessor Macro: Uncomment to build for WSS (Secure), comment out to build for WS (Unsecure) -->
+		<DefineConstants>$(DefineConstants);USE_SECURE</DefineConstants>
 	</PropertyGroup>
 
+
+	<ItemGroup>
+		<Compile Remove="FRMC\**" />
+		<EmbeddedResource Remove="FRMC\**" />
+		<None Remove="FRMC\**" />
+	</ItemGroup>
 
 	<ItemGroup>
 		<None Remove="appsettings.json" />
@@ -36,6 +45,7 @@
 		<PackageReference Include="ScottPlot.WinForms" Version="5.1.57" />
 		<PackageReference Include="ScottPlot.WPF" Version="5.1.57" />
 		<PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.14.0" />
+		<PackageReference Include="System.IO.Ports" Version="8.0.0" />
 	</ItemGroup>
 
 

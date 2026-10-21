@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Net;
@@ -63,6 +63,11 @@ namespace FRCM.View
         private List<InterfaceInfo> _availableInterfaces = new();
 
 
+        // ================= DTS CONNECTION UI =================
+        private TextBox txtDtsIP;
+        private TextBox txtDtsPort;
+        private Button btnSaveDtsConnection;
+
         // ================= PERSISTED VALUES =================
         private static string _lastCurrentFrmcIp = "";
         private static string _lastNewFrmcIp = "";
@@ -92,6 +97,7 @@ namespace FRCM.View
                     this,
                     FRCM.Services.FontSizeHelper.CurrentMultiplier
                 );
+                LoadDtsConnectionSettings();
             };
         }
 
@@ -140,12 +146,13 @@ namespace FRCM.View
                 Dock = DockStyle.Fill,
                 Padding = new Padding(20),
                 ColumnCount = 2,
-                RowCount = 4
+                RowCount = 5
             };
 
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
 
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
@@ -354,6 +361,50 @@ namespace FRCM.View
             root.Controls.Add(grpPortConfig, 0, 1);
             root.SetColumnSpan(grpPortConfig, 2);
 
+            // ================= DTS CONNECTION SETTINGS =================
+            var dtsConnectionLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 5,
+                RowCount = 1,
+                Padding = new Padding(8),
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink
+            };
+
+            dtsConnectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));    // "DTS IP Address:"
+            dtsConnectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F)); // txtDtsIP
+            dtsConnectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));    // "DTS Port:"
+            dtsConnectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20F)); // txtDtsPort
+            dtsConnectionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));    // btnSaveDtsConnection
+
+            dtsConnectionLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            txtDtsIP = new TextBox { Dock = DockStyle.Fill, MaxLength = 15, Margin = new Padding(4) };
+            txtDtsPort = new TextBox { Dock = DockStyle.Fill, MaxLength = 5, Margin = new Padding(4) };
+            btnSaveDtsConnection = CreateButton("Save DTS Settings", _loginRole == "Admin");
+            btnSaveDtsConnection.Click += BtnSaveDtsConnection_Click;
+
+            dtsConnectionLayout.Controls.Add(CreateAlignedLabel("DTS IP Address:"), 0, 0);
+            dtsConnectionLayout.Controls.Add(txtDtsIP, 1, 0);
+            dtsConnectionLayout.Controls.Add(CreateAlignedLabel("DTS Port:"), 2, 0);
+            dtsConnectionLayout.Controls.Add(txtDtsPort, 3, 0);
+            dtsConnectionLayout.Controls.Add(btnSaveDtsConnection, 4, 0);
+
+            var grpDtsConnection = new GroupBox
+            {
+                Text = "DTS Connection Configuration (Admin Only)",
+                Dock = DockStyle.Fill,
+                Padding = new Padding(10),
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(5)
+            };
+            grpDtsConnection.Controls.Add(dtsConnectionLayout);
+
+            root.Controls.Add(grpDtsConnection, 0, 2);
+            root.SetColumnSpan(grpDtsConnection, 2);
+
             // ================= OUTPUT =================
             txtOutput = new TextBox
             {
@@ -365,7 +416,7 @@ namespace FRCM.View
                 Margin = new Padding(8)
             };
 
-            root.Controls.Add(txtOutput, 0, 2);
+            root.Controls.Add(txtOutput, 0, 3);
             root.SetColumnSpan(txtOutput, 2);
 
             // ================= CLOSE =================
@@ -392,7 +443,7 @@ namespace FRCM.View
 
             closeButtonLayout.Controls.Add(btnCancel, 2, 0);
 
-            root.Controls.Add(closeButtonLayout, 0, 3);
+            root.Controls.Add(closeButtonLayout, 0, 4);
             root.SetColumnSpan(closeButtonLayout, 2);
 
             RestoreValues();
@@ -498,6 +549,10 @@ namespace FRCM.View
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             base.OnFormClosing(e);
+            if (Instance == this)
+            {
+                Instance = null;
+            }
         }
 
         private async void BtnGetNetraIP_Click(object sender, EventArgs e)
@@ -907,6 +962,124 @@ namespace FRCM.View
                 MessageBoxIcon.Warning);
 
             return result == DialogResult.Yes;
+        }
+
+        private async void LoadDtsConnectionSettings()
+        {
+            try
+            {
+                AppendOutput("Requesting DTS connection settings via WebSocket...");
+                var msg = new WebSocketMessage
+                {
+                    MessageType = "GetDtsConnection",
+                    Payload = JsonSerializer.SerializeToElement(new { })
+                };
+                await _wsClient.SendAsync(JsonSerializer.Serialize(msg));
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"Failed to request DTS settings: {ex.Message}");
+            }
+        }
+
+        private async void BtnSaveDtsConnection_Click(object? sender, EventArgs e)
+        {
+            if (_loginRole != "Admin")
+            {
+                MessageBox.Show("Only Admin users can change DTS Connection settings.",
+                    "Access Denied", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string ip = txtDtsIP.Text.Trim();
+            string portStr = txtDtsPort.Text.Trim();
+
+            if (string.IsNullOrWhiteSpace(ip) || !IsValidIPv4(ip))
+            {
+                MessageBox.Show("Please enter a valid DTS IP Address.", "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (!int.TryParse(portStr, out int port) || port < 1 || port > 65535)
+            {
+                MessageBox.Show("Please enter a valid Port (1 - 65535).", "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            var firstConfirm = MessageBox.Show(
+                $"Are you sure you want to change the DTS connection settings to IP: {ip}, Port: {port}?",
+                "Confirm Save Settings - Step 1 of 2",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (firstConfirm != DialogResult.Yes)
+            {
+                AppendOutput("Save DTS settings cancelled at first confirmation.");
+                return;
+            }
+
+            var secondConfirm = MessageBox.Show(
+                "Changing the DTS connection settings will modify the FRMC configuration file and force a DTS reconnection.\n\nAre you absolutely sure you want to proceed?",
+                "Confirm Save Settings - Step 2 of 2",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (secondConfirm != DialogResult.Yes)
+            {
+                AppendOutput("Save DTS settings cancelled at second confirmation.");
+                return;
+            }
+
+            AppendOutput($"Saving DTS Connection configuration: IP={ip}, Port={port}...");
+
+            var msg = new WebSocketMessage
+            {
+                MessageType = "UpdateDtsConnection",
+                Payload = JsonSerializer.SerializeToElement(new
+                {
+                    IpAddress = ip,
+                    Port = port
+                })
+            };
+
+            await _wsClient.SendAsync(JsonSerializer.Serialize(msg));
+        }
+
+        public void SetDtsConnection(string ip, int port)
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action(() => SetDtsConnection(ip, port)));
+                return;
+            }
+
+            txtDtsIP.Text = ip;
+            txtDtsPort.Text = port.ToString();
+            AppendOutput($"DTS Connection settings received: IP = {ip}, Port = {port}");
+        }
+
+        public void OnUpdateDtsConnectionSuccess()
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action(OnUpdateDtsConnectionSuccess));
+                return;
+            }
+
+            AppendOutput("DTS Connection configuration updated successfully.");
+            MessageBox.Show("DTS Connection configuration updated successfully.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        public void OnUpdateDtsConnectionFailure(string error)
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action(() => OnUpdateDtsConnectionFailure(error)));
+                return;
+            }
+
+            AppendOutput($"Failed to update DTS Connection configuration: {error}");
+            MessageBox.Show($"Failed to update DTS Connection configuration: {error}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
     }

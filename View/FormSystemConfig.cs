@@ -177,9 +177,11 @@ namespace FRCM
         private double _decimationLargeKm = 6;
         private int _decimationMediumFactor = 5;
         private int _decimationLargeFactor = 10;
+        private SystemConfiguration? _originalConfig;
 
         private void PopulateGrid(SystemConfiguration config)
         {
+            _originalConfig = config;
             if (dgvConfig == null) return;
 
             dgvConfig.Rows.Clear();
@@ -313,7 +315,21 @@ namespace FRCM
                     HealthStatusBroadcastInterval = healthBroadcast,
                     AutoAlarmClearTimeout = timeout,
                     RateOfRiseWindowSeconds = rorWindow,
-                    DtsPointResolutionMeters = dtsPointResolution
+                    DtsPointResolutionMeters = dtsPointResolution,
+                    // Preserve health thresholds and log settings
+                    CpuLoadThreshold = _originalConfig?.CpuLoadThreshold ?? 90.0,
+                    MemoryLoadThreshold = _originalConfig?.MemoryLoadThreshold ?? 90.0,
+                    DtsModuleTempHighThreshold = _originalConfig?.DtsModuleTempHighThreshold ?? 70.0,
+                    DtsModuleTempLowThreshold = _originalConfig?.DtsModuleTempLowThreshold ?? -10.0,
+                    DtsCommunicationTimeoutSeconds = _originalConfig?.DtsCommunicationTimeoutSeconds ?? 10,
+                    HealthMonitoringIntervalSeconds = _originalConfig?.HealthMonitoringIntervalSeconds ?? 120,
+                    MinimumLogLevel = _originalConfig?.MinimumLogLevel ?? "Information",
+                    LogRetentionEnabled = _originalConfig?.LogRetentionEnabled ?? true,
+                    LogMaxAgeDays = _originalConfig?.LogMaxAgeDays ?? 14,
+                    LogTotalQuotaMB = _originalConfig?.LogTotalQuotaMB ?? 10240,
+                    LogHighWatermarkMB = _originalConfig?.LogHighWatermarkMB ?? 9216,
+                    LogLowWatermarkMB = _originalConfig?.LogLowWatermarkMB ?? 7680,
+                    LogCheckIntervalHours = _originalConfig?.LogCheckIntervalHours ?? 12
                 };
 
                 var (success, errorMessage) = await _channelClient.SetSystemConfigAsync(config);

@@ -1,4 +1,4 @@
-﻿using FRCM.Services;
+using FRCM.Services;
 using Microsoft.Extensions.Configuration;
 using System;
 using System.Collections.Generic;
@@ -49,6 +49,44 @@ namespace FRCM
         /// Default: 6165
         /// </summary>
         public static int FrmcDataStreamPort { get; set; } = 6165;
+
+        /// <summary>
+        /// Flag indicating whether secure WebSocket (WSS) and HTTPS should be used.
+        /// Controlled via USE_SECURE preprocessor macro defined in .csproj.
+        /// </summary>
+#if USE_SECURE
+        public static bool FrmcUseSecure { get; set; } = true;
+#else
+        public static bool FrmcUseSecure { get; set; } = false;
+#endif
+
+        /// <summary>
+        /// Centralized helper to get the active WebSocket URI scheme based on configuration.
+        /// </summary>
+        public static string GetWebSocketScheme() => FrmcUseSecure ? "wss" : "ws";
+
+        /// <summary>
+        /// Centralized helper to get the active HTTP/HTTPS scheme based on configuration.
+        /// </summary>
+        public static string GetHttpScheme() => FrmcUseSecure ? "https" : "http";
+
+        /// <summary>
+        /// Centralized helper to construct the FRMC Control WebSocket URI.
+        /// </summary>
+        public static Uri GetControlWebSocketUri() =>
+            new Uri($"{GetWebSocketScheme()}://{FrmcHost}:{FrmcControlPort}/general_ws/");
+
+        /// <summary>
+        /// Centralized helper to construct the Token Authentication API URI.
+        /// </summary>
+        public static Uri GetTokenUri() =>
+            new Uri($"{GetHttpScheme()}://{FrmcHost}:{FrmcControlPort}/get_token");
+
+        /// <summary>
+        /// Centralized helper to construct the Data Stream WebSocket URI.
+        /// </summary>
+        public static Uri GetDataStreamUri(string host, int port) =>
+            new Uri($"{GetWebSocketScheme()}://{host}:{port}/data_stream/");
 
         [DllImport("kernel32.dll")]
         private static extern IntPtr GetConsoleWindow();
@@ -157,6 +195,30 @@ namespace FRCM
             };
 
             Application.SetCompatibleTextRenderingDefault(false);
+
+            // Global exception handlers: prevent silent crashes on background threads
+            Application.ThreadException += (s, ex) =>
+            {
+                Console.WriteLine($"[UNHANDLED UI THREAD EXCEPTION] {ex.Exception.GetType().Name}: {ex.Exception.Message}");
+                Console.WriteLine(ex.Exception.StackTrace);
+                // Don't crash - just log and continue
+            };
+
+            AppDomain.CurrentDomain.UnhandledException += (s, ex) =>
+            {
+                var exception = ex.ExceptionObject as Exception;
+                Console.WriteLine($"[UNHANDLED DOMAIN EXCEPTION] {exception?.GetType().Name}: {exception?.Message}");
+                Console.WriteLine(exception?.StackTrace);
+                // Log but don't terminate - let the app recover if possible
+            };
+
+            TaskScheduler.UnobservedTaskException += (s, ex) =>
+            {
+                Console.WriteLine($"[UNOBSERVED TASK EXCEPTION] {ex.Exception.GetType().Name}: {ex.Exception.Message}");
+                foreach (var inner in ex.Exception.InnerExceptions)
+                    Console.WriteLine($"  Inner: {inner.GetType().Name}: {inner.Message}");
+                ex.SetObserved(); // Prevent process termination
+            };
 
             // 1. Show IP Entry Form first to allow user to configure server address
             using (var ipForm = new FRCM.View.ServerIpEntryForm())
@@ -298,12 +360,8 @@ namespace FRCM
                     });
                 };
 
-                // Subscribe to connection lost event
-                WebSocketClient.ConnectionLost += (sender, e) =>
-                {
-                    Console.WriteLine("[CONNECTION] Connection lost - FRMC may have been killed");
-                    HandleConnectionLost();
-                };
+                // NOTE: ConnectionLost is handled inside Form1.OnMainWebSocketConnectionLost
+                // which retries for 10 seconds then shows a popup - do NOT also call Application.Exit() here.
 
                 try
                 {
@@ -311,8 +369,8 @@ namespace FRCM
                     loadingForm.UpdateStatus($"Connecting to FRMC server ({FrmcHost})...");
 
                     await WebSocketClient.ConnectAsync(
-                        new Uri($"ws://{FrmcHost}:{FrmcControlPort}/general_ws/"),
-                        "connecting").ConfigureAwait(false); // Use placeholder token for initial connection
+                        GetControlWebSocketUri(),
+                        "connecting").ConfigureAwait(false); // Use placeholder token for initial connection and leverage centralized URI generation
 
                     Console.WriteLine($"✅ WebSocket connected to FRMC at {FrmcHost}.");
 
@@ -537,6 +595,14 @@ namespace FRCM
                         FrmcDataStreamPort = dataPort;
                     }
                     Console.WriteLine($"[CONFIG] FRMC Data Stream Port: {FrmcDataStreamPort}");
+
+                    // Load UseSecure setting (WSS/HTTPS option)
+                    var useSecureStr = config["FrmcConfiguration:UseSecure"] ?? config["WebSocketServers:UseSecure"];
+                    if (!string.IsNullOrWhiteSpace(useSecureStr) && bool.TryParse(useSecureStr, out bool useSecure))
+                    {
+                        FrmcUseSecure = useSecure;
+                    }
+                    Console.WriteLine($"[CONFIG] FRMC Use Secure: {FrmcUseSecure}");
                 }
                 else
                 {
@@ -544,6 +610,7 @@ namespace FRCM
                     Console.WriteLine($"[CONFIG]   Host: {FrmcHost}");
                     Console.WriteLine($"[CONFIG]   Control Port: {FrmcControlPort}");
                     Console.WriteLine($"[CONFIG]   Data Stream Port: {FrmcDataStreamPort}");
+                    Console.WriteLine($"[CONFIG]   Use Secure: {FrmcUseSecure}");
                 }
             }
             catch (Exception ex)
@@ -662,7 +729,7 @@ namespace FRCM
                 if (WebSocketClient != null && !WebSocketClient.IsConnected)
                 {
                     await WebSocketClient.ConnectAsync(
-                        new Uri($"ws://{FrmcHost}:{FrmcControlPort}/general_ws/"),
+                        GetControlWebSocketUri(),
                         "reconnecting").ConfigureAwait(false);
                     Console.WriteLine($"[REAUTH] WebSocket reconnected to {FrmcHost}");
                 }
